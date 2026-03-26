@@ -32,7 +32,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   int _currentMessageLength = 0;
   String _lastRxText = '';
   String? _targetHex;
-  List<_NearbyNode> _nearbyNodes = [];
 
   @override
   void initState() {
@@ -47,9 +46,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     ));
 
     // Load saved connection settings from shared preferences
-    _loadConnectionPrefs().then((_) {
-      if (mounted) _loadNearbyNodes();
-    });
+    _loadConnectionPrefs();
 
     // Start polling for incoming messages
     _messagePollTimer = Timer.periodic(
@@ -122,71 +119,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       if (hex.length == 4) return hex;
     }
     return null;
-  }
-
-  String _normalizeNodeAddr(dynamic v) {
-    if (v == null) return '';
-    if (v is String) {
-      var s = v.trim().toUpperCase();
-      if (s.startsWith('0X')) s = s.substring(2);
-      s = s.replaceAll(RegExp(r'[\s:-]'), '');
-      if (s.isEmpty) return '';
-      return s.length <= 4 ? s.padLeft(4, '0') : s;
-    }
-    if (v is num) {
-      final n = v.toInt() & 0xFFFF;
-      return n.toRadixString(16).toUpperCase().padLeft(4, '0');
-    }
-    return '';
-  }
-
-  Future<void> _loadNearbyNodes() async {
-    if (!_isConnected || deviceIp.trim().isEmpty) return;
-    try {
-      final uri = _buildUri('/api/nodes');
-      final response = await http.get(uri).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw Exception('Connection timeout'),
-      );
-      if (!mounted || response.statusCode != 200) return;
-
-      final body = _decodeResponseBody(response);
-      dynamic raw;
-      try {
-        raw = jsonDecode(body);
-      } catch (_) {
-        try {
-          raw = jsonDecode(sanitizeJsonControlCharsInStrings(body));
-        } catch (_) {
-          return;
-        }
-      }
-
-      final list = <_NearbyNode>[];
-      if (raw is Map<String, dynamic>) {
-        final nodes = raw['nodes'];
-        if (nodes is List) {
-          for (final item in nodes) {
-            if (item is String) {
-              final a = _normalizeNodeAddr(item);
-              if (a.isEmpty) continue;
-              list.add(_NearbyNode(addr: a, title: '0x$a'));
-            } else if (item is Map) {
-              final m = Map<String, dynamic>.from(item);
-              final a = _normalizeNodeAddr(m['addr']);
-              if (a.isEmpty) continue;
-              final cs = (m['callSign'] as String?)?.trim() ?? '';
-              final title = cs.isNotEmpty ? cs : '0x$a';
-              list.add(_NearbyNode(addr: a, title: title));
-            }
-          }
-        }
-      }
-
-      if (mounted) setState(() => _nearbyNodes = list);
-    } catch (e) {
-      debugPrint('Failed to load /api/nodes: $e');
-    }
   }
 
   bool _matchesTarget(String fromHex) {
@@ -341,56 +273,65 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       return;
     }
 
+    int outgoingIndex = -1;
+    setState(() {
+      outgoingIndex = _messages.length;
+      _messages.add(
+        ChatMessage(
+          text: messageText,
+          sender: 'You',
+          timestamp: DateTime.now(),
+          isSystem: false,
+          deliveryStatus: MessageDeliveryStatus.sending,
+        ),
+      );
+      _currentMessageLength = 0;
+    });
+    _messageController.clear();
+    _scrollToBottom();
+
     try {
       final target = _targetHex;
-      // Firmware handleSend: /send?msg=… optional &to=AABB (4 hex), optional relay.
+      // Firmware handleSend: /send?msg=... optional &to=AABB.
       final query = <String, String>{'msg': messageText};
       if (target != null && target.isNotEmpty) {
         query['to'] = target;
       }
 
       final uri = _buildUri('/send', query);
-
-      final response = await http.get(
-        uri,
-      ).timeout(
+      final response = await http.get(uri).timeout(
         const Duration(seconds: 5),
         onTimeout: () => throw Exception('Connection timeout'),
       );
+      final body = _decodeResponseBody(response).trim();
 
       if (response.statusCode == 200) {
-        setState(() {
-          _messages.add(ChatMessage(
-            text: messageText,
-            sender: 'You',
-            timestamp: DateTime.now(),
-            isSystem: false,
-          ));
-          _currentMessageLength = 0;
-        });
-
-        _messageController.clear();
-        _scrollToBottom();
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Message sent'),
-            backgroundColor: Colors.green,
-            duration: Duration(seconds: 1),
-          ),
-        );
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.acked);
+      } else if (response.statusCode == 504 ||
+          body.toUpperCase().contains('NO ACK') ||
+          body.toUpperCase().contains('TIMEOUT')) {
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
       } else {
-        throw Exception(
-            'Server returned: ${response.statusCode} - ${_decodeResponseBody(response)}');
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+        throw Exception('Server returned: ${response.statusCode} - $body');
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Failed to send message: ${e.toString()}'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+      if (!mounted) return;
+      // ScaffoldMessenger.of(context).showSnackBar(
+      //   SnackBar(
+      //     content: Text('Failed to send message: ${e.toString()}'),
+      //     backgroundColor: Colors.red,
+      //   ),
+      // );
     }
+  }
+
+  void _updateOutgoingDeliveryStatus(int index, MessageDeliveryStatus status) {
+    if (!mounted || index < 0 || index >= _messages.length) return;
+    setState(() {
+      _messages[index] = _messages[index].copyWith(deliveryStatus: status);
+    });
   }
 
   void _scrollToBottom() {
@@ -491,6 +432,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     Row(
                       children: [
                         // Message input
+
                         Expanded(
                           child: Container(
                             decoration: BoxDecoration(
@@ -511,13 +453,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               ),
                               maxLines: 4,
                               minLines: 1,
-                              maxLength: 200,
+                              maxLength: 50,
                               textCapitalization:
                                   TextCapitalization.sentences,
                               onChanged: (value) {
                                 setState(() {
                                   _currentMessageLength =
-                                      value.length.clamp(0, 200);
+                                      value.length.clamp(0, 50);
                                 });
                               },
                               onSubmitted: (_) => _sendMessage(),
@@ -549,7 +491,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     Padding(
                       padding: const EdgeInsets.only(left: 4),
                       child: Text(
-                        '${_currentMessageLength} / 200',
+                        '${_currentMessageLength} / 50',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               fontSize: 11,
                               color: Theme.of(context)
@@ -573,12 +515,5 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     super.didChangeDependencies();
     _targetHex ??= _resolveTargetHex();
   }
-}
-
-class _NearbyNode {
-  const _NearbyNode({required this.addr, required this.title});
-
-  final String addr;
-  final String title;
 }
 

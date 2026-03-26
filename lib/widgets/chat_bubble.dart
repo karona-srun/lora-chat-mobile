@@ -10,6 +10,7 @@ class ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isMe = message.sender == 'You';
     final isSystem = message.isSystem;
+    final status = message.deliveryStatus;
 
     if (isSystem) {
       return Padding(
@@ -97,6 +98,27 @@ class ChatBubble extends StatelessWidget {
                           : Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
+                  if (isMe && status != MessageDeliveryStatus.none) ...[
+                    const SizedBox(height: 2),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _statusIcon(status),
+                          size: 12,
+                          color: _statusColor(context, status),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          _statusText(status),
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: _statusColor(context, status),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -112,6 +134,51 @@ class ChatBubble extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  IconData _statusIcon(MessageDeliveryStatus status) {
+    switch (status) {
+      case MessageDeliveryStatus.sending:
+        return Icons.schedule;
+      case MessageDeliveryStatus.acked:
+        return Icons.done_all;
+      case MessageDeliveryStatus.noAck:
+        return Icons.warning_amber_rounded;
+      case MessageDeliveryStatus.failed:
+        return Icons.error_outline;
+      case MessageDeliveryStatus.none:
+        return Icons.check;
+    }
+  }
+
+  Color _statusColor(BuildContext context, MessageDeliveryStatus status) {
+    switch (status) {
+      case MessageDeliveryStatus.sending:
+        return Colors.white70;
+      case MessageDeliveryStatus.acked:
+        return Colors.white;
+      case MessageDeliveryStatus.noAck:
+        return Colors.amber[200] ?? Colors.amberAccent;
+      case MessageDeliveryStatus.failed:
+        return Colors.red[200] ?? Colors.redAccent;
+      case MessageDeliveryStatus.none:
+        return Theme.of(context).colorScheme.onSurfaceVariant;
+    }
+  }
+
+  String _statusText(MessageDeliveryStatus status) {
+    switch (status) {
+      case MessageDeliveryStatus.sending:
+        return 'Sending...';
+      case MessageDeliveryStatus.acked:
+        return 'ACK';
+      case MessageDeliveryStatus.noAck:
+        return 'No ACK';
+      case MessageDeliveryStatus.failed:
+        return 'Failed';
+      case MessageDeliveryStatus.none:
+        return '';
+    }
   }
 }
 

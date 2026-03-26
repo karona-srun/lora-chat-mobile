@@ -7,13 +7,13 @@ import 'l10n/app_localizations.dart';
 import 'screens/channel_screen.dart';
 import 'screens/connect_screen.dart';
 import 'screens/settings_screen.dart';
+import 'services/local_database_service.dart';
 import 'services/message_background_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  await LocalDatabaseService.instance.ensureInitialized();
   await MessageBackgroundService.ensureInitialized();
   runApp(const SplashWrapper());
 }
@@ -201,16 +201,12 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
         onThemeChanged: _onThemeChanged,
         onLanguageChanged: _onLanguageChanged,
       ),
-    ); 
+    );
   }
 }
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({
-    super.key,
-    this.onThemeChanged,
-    this.onLanguageChanged,
-  });
+  const MainScreen({super.key, this.onThemeChanged, this.onLanguageChanged});
 
   final void Function(bool dark)? onThemeChanged;
   final void Function(bool isKhmer)? onLanguageChanged;
@@ -238,23 +234,20 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   List<Widget> get _screens => [
-        const ChannelScreen(),
-        const ConnectScreen(),
-        SettingsScreen(
-          key: ValueKey('settings-$_settingsRefreshToken'),
-          onThemeChanged: widget.onThemeChanged,
-          onLanguageChanged: widget.onLanguageChanged,
-        ),
-      ];
+    const ChannelScreen(),
+    const ConnectScreen(),
+    SettingsScreen(
+      key: ValueKey('settings-$_settingsRefreshToken'),
+      onThemeChanged: widget.onThemeChanged,
+      onLanguageChanged: widget.onLanguageChanged,
+    ),
+  ];
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _screens,
-      ),
+      body: IndexedStack(index: _currentIndex, children: _screens),
       bottomNavigationBar: NavigationBar(
         backgroundColor: Colors.transparent,
         indicatorColor: Colors.transparent,

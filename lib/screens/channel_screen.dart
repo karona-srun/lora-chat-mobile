@@ -9,10 +9,11 @@ class ChannelScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-
+    final l10n = AppLocalizations.of(context);
     return Scaffold(
+      
       appBar: AppBar(
-        title: Text(AppLocalizations.of(context).tr('messages')),
+        title: Text(l10n.tr('messages')),
         elevation: 0,
       ),
       body: Column(
@@ -35,8 +36,8 @@ class ChannelScreen extends StatelessWidget {
                 size: 24,
               ),
             ),
-            title: const Text(
-              'Channels',
+            title: Text(
+              AppLocalizations.of(context).tr('channels'),
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
             ),
             trailing: const Icon(Icons.chevron_right, size: 20),
@@ -66,8 +67,8 @@ class ChannelScreen extends StatelessWidget {
                 size: 24,
               ),
             ),
-            title: const Text(
-              'Direct Messages',
+            title: Text(
+              AppLocalizations.of(context).tr('contacts'),
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
             ),
             trailing: const Icon(Icons.chevron_right, size: 20),
@@ -101,8 +102,7 @@ class ChannelScreen extends StatelessWidget {
                         size: 32,
                       ),
                       const SizedBox(width: 12),
-                      const Text(
-                        'Messages',
+                      Text(l10n.tr('directMessages'),
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,

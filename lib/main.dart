@@ -1,13 +1,46 @@
+import 'package:another_flutter_splash_screen/another_flutter_splash_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'l10n/app_localizations.dart';
 import 'screens/channel_screen.dart';
 import 'screens/connect_screen.dart';
 import 'screens/settings_screen.dart';
+import 'services/message_background_service.dart';
 
-void main() {
-  runApp(const MeshtasticApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
+  await MessageBackgroundService.ensureInitialized();
+  runApp(const SplashWrapper());
+}
+
+/// Root widget that shows [another_flutter_splash_screen] then [MeshtasticApp].
+class SplashWrapper extends StatelessWidget {
+  const SplashWrapper({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: FlutterSplashScreen.fadeIn(
+        backgroundColor: Colors.white,
+        duration: const Duration(milliseconds: 1500),
+        onInit: () async {
+          await SharedPreferences.getInstance();
+        },
+        childWidget: SizedBox(
+          height: 200,
+          width: 200,
+          child: Image.asset('assets/images/logo.png', fit: BoxFit.contain),
+        ),
+        nextScreen: const MeshtasticApp(),
+      ),
+    );
+  }
 }
 
 class MeshtasticApp extends StatefulWidget {
@@ -24,26 +57,25 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
   @override
   void initState() {
     super.initState();
-    _loadThemePreference();
-    _loadLocalePreference();
+    _loadPreferences();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      MessageBackgroundService.requestNotificationPermissions();
+    });
   }
 
-  Future<void> _loadThemePreference() async {
+  Future<void> _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     final dark = prefs.getBool('dark_mode');
-    if (dark != null && mounted) {
-      setState(() {
-        _themeMode = dark ? ThemeMode.dark : ThemeMode.light;
-      });
-    }
-  }
-
-  Future<void> _loadLocalePreference() async {
-    final prefs = await SharedPreferences.getInstance();
     final code = prefs.getString('locale');
-    if (code != null && mounted && (code == 'en' || code == 'km')) {
-      setState(() => _locale = Locale(code));
-    }
+    setState(() {
+      if (dark != null) {
+        _themeMode = dark ? ThemeMode.dark : ThemeMode.light;
+      }
+      if (code != null && (code == 'en' || code == 'km')) {
+        _locale = Locale(code);
+      }
+    });
   }
 
   void _onThemeChanged(bool dark) {
@@ -61,7 +93,7 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Meshtastic Chat',
+      title: 'Lomhor',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.light(
@@ -76,17 +108,35 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
           onSurfaceVariant: Colors.black87,
           outline: Colors.black,
           outlineVariant: Colors.black54,
-          surfaceContainerHighest: Colors.black12,
-          surfaceContainerHigh: Colors.black12,
-          surfaceContainer: Colors.black12,
-          surfaceContainerLow: Colors.black12,
+          surfaceContainerHighest: const Color(0xFFF5F5F5),
+          surfaceContainerHigh: const Color(0xFFFAFAFA),
+          surfaceContainer: const Color(0xFFF5F5F5),
+          surfaceContainerLow: Colors.white,
           surfaceBright: Colors.white,
-          surfaceDim: Colors.black12,
+          surfaceDim: const Color(0xFFEEEEEE),
           inverseSurface: Colors.white,
           onInverseSurface: Colors.black,
           inversePrimary: Colors.white,
           error: Colors.black,
           onError: Colors.white,
+          scrim: Colors.black54,
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          elevation: 24,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          titleTextStyle: const TextStyle(
+            color: Colors.black,
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+          ),
+          contentTextStyle: const TextStyle(
+            color: Colors.black87,
+            fontSize: 14,
+          ),
         ),
         useMaterial3: true,
       ),
@@ -103,17 +153,35 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
           onSurfaceVariant: Colors.white70,
           outline: Colors.white,
           outlineVariant: Colors.white54,
-          surfaceContainerHighest: Colors.white12,
-          surfaceContainerHigh: Colors.white12,
-          surfaceContainer: Colors.white12,
-          surfaceContainerLow: Colors.white12,
-          surfaceBright: Colors.white12,
+          surfaceContainerHighest: const Color(0xFF2D2D2D),
+          surfaceContainerHigh: const Color(0xFF262626),
+          surfaceContainer: const Color(0xFF2D2D2D),
+          surfaceContainerLow: const Color(0xFF1A1A1A),
+          surfaceBright: const Color(0xFF383838),
           surfaceDim: Colors.black,
           inverseSurface: Colors.black,
           onInverseSurface: Colors.white,
           inversePrimary: Colors.black,
           error: Colors.white,
           onError: Colors.black,
+          scrim: Colors.black87,
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: const Color(0xFF1E1E1E),
+          surfaceTintColor: Colors.transparent,
+          elevation: 24,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          titleTextStyle: const TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+          ),
+          contentTextStyle: const TextStyle(
+            color: Colors.white70,
+            fontSize: 14,
+          ),
         ),
         useMaterial3: true,
       ),
@@ -125,14 +193,15 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      home: AppLocalizations.wrap(
-        locale: _locale,
-        child: MainScreen(
-          onThemeChanged: _onThemeChanged,
-          onLanguageChanged: _onLanguageChanged,
-        ),
+      builder: (context, child) {
+        if (child == null) return const SizedBox.shrink();
+        return AppLocalizations.wrap(locale: _locale, child: child);
+      },
+      home: MainScreen(
+        onThemeChanged: _onThemeChanged,
+        onLanguageChanged: _onLanguageChanged,
       ),
-    );
+    ); 
   }
 }
 
@@ -152,11 +221,27 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0; // Start with Channels & Chats tab
+  int _settingsRefreshToken = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(_lifecycleObserver);
+  }
+
+  final _AppLifecycleObserver _lifecycleObserver = _AppLifecycleObserver();
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(_lifecycleObserver);
+    super.dispose();
+  }
 
   List<Widget> get _screens => [
         const ChannelScreen(),
         const ConnectScreen(),
         SettingsScreen(
+          key: ValueKey('settings-$_settingsRefreshToken'),
           onThemeChanged: widget.onThemeChanged,
           onLanguageChanged: widget.onLanguageChanged,
         ),
@@ -176,6 +261,9 @@ class _MainScreenState extends State<MainScreen> {
         selectedIndex: _currentIndex,
         onDestinationSelected: (int index) {
           setState(() {
+            if (index == 2 && _currentIndex != 2) {
+              _settingsRefreshToken++;
+            }
             _currentIndex = index;
           });
         },
@@ -197,5 +285,13 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
     );
+  }
+}
+
+class _AppLifecycleObserver with WidgetsBindingObserver {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final isForeground = state == AppLifecycleState.resumed;
+    MessageBackgroundService.setAppForegroundState(isForeground);
   }
 }

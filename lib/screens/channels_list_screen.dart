@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'chat_detail_screen.dart';
+import '../l10n/app_localizations.dart';
 
 class ChannelsListScreen extends StatelessWidget {
   const ChannelsListScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final chats = [
       'Mesh Group',
       'Nearby Nodes',
@@ -15,8 +17,22 @@ class ChannelsListScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Channels'),
+        title: Text(l10n.tr('channels')),
         elevation: 0,
+        leading: IconButton(
+          onPressed: () {
+            Navigator.of(context).pop();
+          },
+          icon: const Icon(Icons.arrow_back_ios_new),
+        ),
+        actions: [
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+            },
+            icon: const Icon(Icons.add),
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

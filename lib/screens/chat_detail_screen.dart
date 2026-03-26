@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/chat_message.dart';
+import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
 
 class ChatDetailScreen extends StatefulWidget {
@@ -13,7 +15,7 @@ class ChatDetailScreen extends StatefulWidget {
   });
 
   final String title;
-  final int? targetNodeId;
+  final String? targetNodeId;
 
   @override
   State<ChatDetailScreen> createState() => _ChatDetailScreenState();
@@ -28,8 +30,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   String devicePort = ''; // Loaded from SharedPreferences
   Timer? _messagePollTimer;
   int _currentMessageLength = 0;
-  final Set<String> _seenChatLines = <String>{};
-  bool _initializedChatSnapshot = false;
+  String _lastRxText = '';
+  String? _targetHex;
+  List<_NearbyNode> _nearbyNodes = [];
 
   @override
   void initState() {
@@ -37,14 +40,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     // Add a welcome message
     _messages.add(ChatMessage(
       text:
-          'Welcome to Meshtastic Chat! Connect to a mesh network to start messaging.',
+          'Connect to a LoRa node (saved IP/port), then send via /send. ',
       sender: 'System',
       timestamp: DateTime.now(),
       isSystem: true,
     ));
 
     // Load saved connection settings from shared preferences
-    _loadConnectionPrefs();
+    _loadConnectionPrefs().then((_) {
+      if (mounted) _loadNearbyNodes();
+    });
 
     // Start polling for incoming messages
     _messagePollTimer = Timer.periodic(
@@ -72,101 +77,252 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       if (!mounted) return;
 
       setState(() {
-        // Fallback to sensible defaults if nothing saved yet
         deviceIp =
             (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
         devicePort =
             (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
-        _isConnected = true;
+        _isConnected = deviceIp.isNotEmpty;
       });
-
-      // If this chat was opened for a specific node, tell the device which
-      // target to use for subsequent /send calls.
-      if (widget.targetNodeId != null) {
-        await _selectTargetNode(widget.targetNodeId!);
-      }
     } catch (e) {
       debugPrint('Failed to load connection prefs: $e');
     }
   }
 
-  Future<void> _selectTargetNode(int id) async {
+  Uri _buildUri(String path, [Map<String, String>? query]) {
+    final host = deviceIp.trim();
+    if (host.isEmpty) {
+      throw Exception('Missing device IP');
+    }
+    final trimmedPort = devicePort.trim();
+    final parsedPort = int.tryParse(trimmedPort);
+    return Uri(
+      scheme: 'http',
+      host: host,
+      port: parsedPort ?? 80,
+      path: path,
+      queryParameters: query,
+    );
+  }
+
+  String? _resolveTargetHex() {
+    final targetId = widget.targetNodeId?.trim();
+    if (targetId != null && targetId.isNotEmpty) {
+      var t = targetId.toUpperCase();
+      if (t.startsWith('0X')) t = t.substring(2);
+      t = t.replaceAll(RegExp(r'[\s:-]'), '');
+      if (t.length == 2) return '00${t.padLeft(2, '0')}';
+      if (t.length == 4) return t.padLeft(4, '0');
+    }
+    final fromTitle =
+        RegExp(r'0x([0-9A-Fa-f]{2,4})', caseSensitive: false)
+            .firstMatch(widget.title);
+    if (fromTitle != null) {
+      var hex = (fromTitle.group(1) ?? '').toUpperCase();
+      if (hex.length == 2) hex = '00$hex';
+      if (hex.length == 4) return hex;
+    }
+    return null;
+  }
+
+  String _normalizeNodeAddr(dynamic v) {
+    if (v == null) return '';
+    if (v is String) {
+      var s = v.trim().toUpperCase();
+      if (s.startsWith('0X')) s = s.substring(2);
+      s = s.replaceAll(RegExp(r'[\s:-]'), '');
+      if (s.isEmpty) return '';
+      return s.length <= 4 ? s.padLeft(4, '0') : s;
+    }
+    if (v is num) {
+      final n = v.toInt() & 0xFFFF;
+      return n.toRadixString(16).toUpperCase().padLeft(4, '0');
+    }
+    return '';
+  }
+
+  Future<void> _loadNearbyNodes() async {
+    if (!_isConnected || deviceIp.trim().isEmpty) return;
     try {
-      final uri = Uri.parse('http://$deviceIp:$devicePort/select');
-      await http.post(
-        uri,
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'id=$id',
-      ).timeout(
+      final uri = _buildUri('/api/nodes');
+      final response = await http.get(uri).timeout(
         const Duration(seconds: 5),
-        onTimeout: () {
-          throw Exception('Connection timeout');
-        },
+        onTimeout: () => throw Exception('Connection timeout'),
       );
+      if (!mounted || response.statusCode != 200) return;
+
+      final body = _decodeResponseBody(response);
+      dynamic raw;
+      try {
+        raw = jsonDecode(body);
+      } catch (_) {
+        try {
+          raw = jsonDecode(sanitizeJsonControlCharsInStrings(body));
+        } catch (_) {
+          return;
+        }
+      }
+
+      final list = <_NearbyNode>[];
+      if (raw is Map<String, dynamic>) {
+        final nodes = raw['nodes'];
+        if (nodes is List) {
+          for (final item in nodes) {
+            if (item is String) {
+              final a = _normalizeNodeAddr(item);
+              if (a.isEmpty) continue;
+              list.add(_NearbyNode(addr: a, title: '0x$a'));
+            } else if (item is Map) {
+              final m = Map<String, dynamic>.from(item);
+              final a = _normalizeNodeAddr(m['addr']);
+              if (a.isEmpty) continue;
+              final cs = (m['callSign'] as String?)?.trim() ?? '';
+              final title = cs.isNotEmpty ? cs : '0x$a';
+              list.add(_NearbyNode(addr: a, title: title));
+            }
+          }
+        }
+      }
+
+      if (mounted) setState(() => _nearbyNodes = list);
     } catch (e) {
-      debugPrint('Failed to select target node $id: $e');
+      debugPrint('Failed to load /api/nodes: $e');
     }
   }
 
+  bool _matchesTarget(String fromHex) {
+    final target = _targetHex;
+    if (target == null || target.isEmpty) return true;
+    return fromHex.toUpperCase() == target.toUpperCase();
+  }
+
+  Map<String, dynamic> _trafficFromStatus(Map<String, dynamic> data) {
+    final traffic = data['traffic'];
+    if (traffic is Map<String, dynamic>) return traffic;
+    return data;
+  }
+
+  /// Device JSON may include raw LoRa payloads; strict UTF-8 on [http.Response.body] throws.
+  String _decodeResponseBody(http.Response response) {
+    return utf8.decode(response.bodyBytes, allowMalformed: true);
+  }
+
   Future<void> _fetchMessages() async {
+    if (!_isConnected || deviceIp.trim().isEmpty) return;
     try {
-      final uri = Uri.parse('http://$deviceIp:$devicePort/chat');
+      final prefs = await SharedPreferences.getInstance();
+      final myCallSign = prefs.getString('callSign')?.trim().toUpperCase() ?? '';
+
+      final uri = _buildUri('/api/status');
       final response = await http.get(uri).timeout(
         const Duration(seconds: 5),
-        onTimeout: () {
-          throw Exception('Connection timeout');
-        },
+        onTimeout: () => throw Exception('Connection timeout'),
       );
-
       if (response.statusCode != 200) return;
 
-      final responseText = response.body.trim();
-      if (responseText.isEmpty) return;
+      final rawBody = _decodeResponseBody(response);
+      dynamic decodedRaw;
+      try {
+        decodedRaw = jsonDecode(rawBody);
+      } catch (_) {
+        try {
+          decodedRaw =
+              jsonDecode(sanitizeJsonControlCharsInStrings(rawBody));
+        } catch (e) {
+          debugPrint('Failed to parse /api/status JSON: $e');
+          return;
+        }
+      }
+      if (decodedRaw is! Map<String, dynamic>) return;
+      final decoded = decodedRaw;
 
-      // Expected plain-text format: \"Node X: message text\\n\"
-      final lines = responseText
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList();
+      final traffic = _trafficFromStatus(decoded);
 
-      if (lines.isEmpty) return;
+      final lastRx = traffic['lastReceived']?.toString().trim() ?? '';
+      if (lastRx.isEmpty || lastRx == _lastRxText) return;
 
-      // On first open of the chat screen, treat the existing history as
-      // \"cleared\": mark all current lines as seen but don't display them.
-      if (!_initializedChatSnapshot) {
-        _seenChatLines.addAll(lines);
-        _initializedChatSnapshot = true;
+      // Discovery beacons — same as WebUI noise; do not show in chat.
+      if (lastRx.startsWith('HELLO|')) {
+        _lastRxText = lastRx;
         return;
       }
 
-      for (var line in lines) {
-        // Skip lines we've already processed in this session.
-        if (_seenChatLines.contains(line)) continue;
+      // Ignore telemetry/noise frame pattern like `0|41|...`.
+      if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(lastRx)) {
+        _lastRxText = lastRx;
+        return;
+      }
 
-        final match = RegExp(r'^Node (\d+):\s*(.+)$').firstMatch(line);
-        if (match == null) continue;
+      _lastRxText = lastRx;
 
-        final fromNode = match.group(1) ?? '0';
-        final text = match.group(2) ?? '';
-        if (text.isEmpty) continue;
+      final tagged = RegExp(
+        r'^From 0x([0-9A-Fa-f]{2,4})\s*:\s*(.+)$',
+        caseSensitive: false,
+      ).firstMatch(lastRx);
+      if (tagged != null) {
+        var fromHex = (tagged.group(1) ?? '').toUpperCase();
+        final text = (tagged.group(2) ?? '').trim();
+        if (text.isEmpty) return;
+        if (fromHex.length == 2) fromHex = '00$fromHex';
+        if (fromHex.length == 4 && !_matchesTarget(fromHex)) return;
 
+        if (!mounted) return;
         setState(() {
-          _seenChatLines.add(line);
           _messages.add(
             ChatMessage(
               text: text,
-              sender: 'Node $fromNode',
+              sender: 'Node 0x$fromHex',
               timestamp: DateTime.now(),
               isSystem: false,
             ),
           );
         });
+        _scrollToBottom();
+        return;
       }
 
+      // RELAY|DEST|payload — show payload; optional filter by dest in DM view.
+      final relay = RegExp(
+        r'^RELAY\|([0-9A-Fa-f]{4})\|(.+)$',
+        caseSensitive: false,
+      ).firstMatch(lastRx);
+      if (relay != null) {
+        final destHex = (relay.group(1) ?? '').toUpperCase();
+        final text = (relay.group(2) ?? '').trim();
+        if (text.isEmpty) return;
+        final target = _targetHex;
+        if (target != null &&
+            destHex.toUpperCase() != target.toUpperCase()) {
+          return;
+        }
+        if (!mounted) return;
+        setState(() {
+          _messages.add(
+            ChatMessage(
+              text: text,
+              sender: 'Via relay → 0x$destHex',
+              timestamp: DateTime.now(),
+              isSystem: false,
+            ),
+          );
+        });
+        _scrollToBottom();
+        return;
+      }
+
+      // Plain LoRa payload (firmware stores raw `rc.data` in lastReceived).
+      if (!mounted) return;
+      setState(() {
+        _messages.add(
+          ChatMessage(
+            text: lastRx,
+            sender: myCallSign.isNotEmpty ? myCallSign : ' ',
+            timestamp: DateTime.now(),
+            isSystem: false,
+          ),
+        );
+      });
       _scrollToBottom();
     } catch (e) {
-      // Swallow fetch errors to avoid spamming the user
       debugPrint('Failed to fetch messages: $e');
     }
   }
@@ -185,25 +341,24 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       return;
     }
 
-    // Following Arduino code pattern: POST /send with body m=MESSAGE
     try {
-      final uri = Uri.parse('http://$deviceIp:$devicePort/send');
+      final target = _targetHex;
+      // Firmware handleSend: /send?msg=… optional &to=AABB (4 hex), optional relay.
+      final query = <String, String>{'msg': messageText};
+      if (target != null && target.isNotEmpty) {
+        query['to'] = target;
+      }
 
-      final response = await http.post(
+      final uri = _buildUri('/send', query);
+
+      final response = await http.get(
         uri,
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'm=${Uri.encodeComponent(messageText)}',
       ).timeout(
         const Duration(seconds: 5),
-        onTimeout: () {
-          throw Exception('Connection timeout');
-        },
+        onTimeout: () => throw Exception('Connection timeout'),
       );
 
-      final responseBody = response.body.trim().toUpperCase();
-
-      if (response.statusCode == 200 && responseBody == 'OK') {
-        // Message sent successfully - add to local messages
+      if (response.statusCode == 200) {
         setState(() {
           _messages.add(ChatMessage(
             text: messageText,
@@ -226,7 +381,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         );
       } else {
         throw Exception(
-            'Server returned: ${response.statusCode} - ${response.body}');
+            'Server returned: ${response.statusCode} - ${_decodeResponseBody(response)}');
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -253,10 +408,30 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final targetLabel =
+        _targetHex == null ? 'Device default' : '0x$_targetHex';
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
         elevation: 0,
+        actions: [
+          Row(
+            children: [
+              Icon(
+              Icons.wifi_tethering,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: 3),
+            Text(targetLabel,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w400,
+            ),
+            ),
+            const SizedBox(width: 10),
+            ],
+          )
+        ],
       ),
       body: Column(
         children: [
@@ -336,13 +511,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               ),
                               maxLines: 4,
                               minLines: 1,
-                              maxLength: 120,
+                              maxLength: 200,
                               textCapitalization:
                                   TextCapitalization.sentences,
                               onChanged: (value) {
                                 setState(() {
                                   _currentMessageLength =
-                                      value.length.clamp(0, 120);
+                                      value.length.clamp(0, 200);
                                 });
                               },
                               onSubmitted: (_) => _sendMessage(),
@@ -374,7 +549,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     Padding(
                       padding: const EdgeInsets.only(left: 4),
                       child: Text(
-                        '${_currentMessageLength} / 120',
+                        '${_currentMessageLength} / 200',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               fontSize: 11,
                               color: Theme.of(context)
@@ -392,5 +567,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       ),
     );
   }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _targetHex ??= _resolveTargetHex();
+  }
+}
+
+class _NearbyNode {
+  const _NearbyNode({required this.addr, required this.title});
+
+  final String addr;
+  final String title;
 }
 

@@ -346,7 +346,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     });
   }
 
-
   @override
   Widget build(BuildContext context) {
     final targetLabel =

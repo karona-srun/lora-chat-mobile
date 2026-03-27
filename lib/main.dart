@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'l10n/app_localizations.dart';
-import 'screens/channel_screen.dart';
+import 'screens/group_screen.dart';
 import 'screens/connect_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/local_database_service.dart';
@@ -234,7 +234,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   List<Widget> get _screens => [
-    const ChannelScreen(),
+    const GroupScreen(),
     const ConnectScreen(),
     SettingsScreen(
       key: ValueKey('settings-$_settingsRefreshToken'),

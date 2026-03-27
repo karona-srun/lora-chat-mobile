@@ -144,6 +144,9 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
                       backgroundColor: Colors.red,
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                     icon: _removing
                         ? const SizedBox(

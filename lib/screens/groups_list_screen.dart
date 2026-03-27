@@ -1,18 +1,18 @@
 import 'package:flutter/material.dart';
-import 'chat_detail_screen.dart';
 import 'create_group_screen.dart';
+import 'group_chat_screen.dart';
 import 'group_details_screen.dart';
 import '../l10n/app_localizations.dart';
 import '../services/local_database_service.dart';
 
-class ChannelsListScreen extends StatefulWidget {
-  const ChannelsListScreen({super.key});
+class GroupsListScreen extends StatefulWidget {
+  const GroupsListScreen({super.key});
 
   @override
-  State<ChannelsListScreen> createState() => _ChannelsListScreenState();
+  State<GroupsListScreen> createState() => _GroupsListScreenState();
 }
 
-class _ChannelsListScreenState extends State<ChannelsListScreen> {
+class _GroupsListScreenState extends State<GroupsListScreen> {
   late Future<List<GroupSummaryRecord>> _groupsFuture;
 
   @override
@@ -39,7 +39,10 @@ class _ChannelsListScreenState extends State<ChannelsListScreen> {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ChatDetailScreen(title: result.groupName),
+        builder: (_) => GroupChatScreen(
+          groupId: result.groupId,
+          groupTitle: result.groupName,
+        ),
       ),
     );
     if (!mounted) return;
@@ -64,7 +67,7 @@ class _ChannelsListScreenState extends State<ChannelsListScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(l10n.tr('channels')),
+        title: Text(l10n.tr('groups')),
         elevation: 0,
         leading: IconButton(
           onPressed: () {
@@ -141,7 +144,10 @@ class _ChannelsListScreenState extends State<ChannelsListScreen> {
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => ChatDetailScreen(title: name),
+                        builder: (_) => GroupChatScreen(
+                          groupId: group.groupId,
+                          groupTitle: name,
+                        ),
                       ),
                     );
                   },

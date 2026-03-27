@@ -31,14 +31,14 @@ String _fieldToString(dynamic v) {
   return v.toString();
 }
 
-class DirectMessagesScreen extends StatefulWidget {
-  const DirectMessagesScreen({super.key});
+class ContactsListScreen extends StatefulWidget {
+  const ContactsListScreen({super.key});
 
   @override
-  State<DirectMessagesScreen> createState() => _DirectMessagesScreenState();
+  State<ContactsListScreen> createState() => _ContactsListScreenState();
 }
 
-class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
+class _ContactsListScreenState extends State<ContactsListScreen> {
   late Future<List<_NodeEntry>> _nodesFuture;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';

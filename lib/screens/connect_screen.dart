@@ -296,6 +296,12 @@ class _ConnectScreenState extends State<ConnectScreen> {
     final prefs = await SharedPreferences.getInstance();
     final nextCallSign = node['callSign']?.toString().trim() ?? '';
     final currentCallSign = prefs.getString('callSign')?.trim() ?? '';
+    final nextMyAddr = node['myAddr']?.toString().trim().toUpperCase() ?? '';
+    final currentMyAddr = prefs.getString('myAddr')?.trim() ?? '';
+    
+    if (nextMyAddr != currentMyAddr) {
+      await prefs.setString('myAddr', nextMyAddr);
+    }
     
     if (nextCallSign != currentCallSign) {
       await prefs.setString('callSign', nextCallSign);

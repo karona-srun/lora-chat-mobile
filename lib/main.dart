@@ -2,18 +2,19 @@ import 'package:another_flutter_splash_screen/another_flutter_splash_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:khmer_fonts/khmer_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'l10n/app_localizations.dart';
-import 'screens/channel_screen.dart';
+import 'screens/group_screen.dart';
 import 'screens/connect_screen.dart';
 import 'screens/settings_screen.dart';
+import 'services/local_database_service.dart';
 import 'services/message_background_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  await LocalDatabaseService.instance.ensureInitialized();
   await MessageBackgroundService.ensureInitialized();
   runApp(const SplashWrapper());
 }
@@ -96,6 +97,10 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
       title: 'Lomhor',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        textTheme: ThemeData.light().textTheme.apply(
+          fontFamily: KhmerFonts.hanuman,
+          package: 'khmer_fonts',
+        ),
         colorScheme: ColorScheme.light(
           primary: Colors.black,
           onPrimary: Colors.white,
@@ -141,6 +146,10 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
+        textTheme: ThemeData.dark().textTheme.apply(
+          fontFamily: KhmerFonts.hanuman,
+          package: 'khmer_fonts',
+        ),
         colorScheme: ColorScheme.dark(
           primary: Colors.white,
           onPrimary: Colors.black,
@@ -201,16 +210,12 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
         onThemeChanged: _onThemeChanged,
         onLanguageChanged: _onLanguageChanged,
       ),
-    ); 
+    );
   }
 }
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({
-    super.key,
-    this.onThemeChanged,
-    this.onLanguageChanged,
-  });
+  const MainScreen({super.key, this.onThemeChanged, this.onLanguageChanged});
 
   final void Function(bool dark)? onThemeChanged;
   final void Function(bool isKhmer)? onLanguageChanged;
@@ -238,23 +243,20 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   List<Widget> get _screens => [
-        const ChannelScreen(),
-        const ConnectScreen(),
-        SettingsScreen(
-          key: ValueKey('settings-$_settingsRefreshToken'),
-          onThemeChanged: widget.onThemeChanged,
-          onLanguageChanged: widget.onLanguageChanged,
-        ),
-      ];
+    const GroupScreen(),
+    const ConnectScreen(),
+    SettingsScreen(
+      key: ValueKey('settings-$_settingsRefreshToken'),
+      onThemeChanged: widget.onThemeChanged,
+      onLanguageChanged: widget.onLanguageChanged,
+    ),
+  ];
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _screens,
-      ),
+      body: IndexedStack(index: _currentIndex, children: _screens),
       bottomNavigationBar: NavigationBar(
         backgroundColor: Colors.transparent,
         indicatorColor: Colors.transparent,

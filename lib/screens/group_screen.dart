@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'channels_list_screen.dart';
-import 'direct_messages_screen.dart';
+import 'contact_list_screen.dart';
+import 'groups_list_screen.dart';
 import '../l10n/app_localizations.dart';
 
-class ChannelScreen extends StatelessWidget {
-  const ChannelScreen({super.key});
+class GroupScreen extends StatelessWidget {
+  const GroupScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -37,14 +37,14 @@ class ChannelScreen extends StatelessWidget {
               ),
             ),
             title: Text(
-              AppLocalizations.of(context).tr('channels'),
+              AppLocalizations.of(context).tr('groups'),
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
             ),
             trailing: const Icon(Icons.chevron_right, size: 20),
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const ChannelsListScreen(),
+                  builder: (_) => const GroupsListScreen(),
                 ),
               );
             },
@@ -75,7 +75,7 @@ class ChannelScreen extends StatelessWidget {
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const DirectMessagesScreen(),
+                  builder: (_) => const ContactsListScreen(),
                 ),
               );
             },

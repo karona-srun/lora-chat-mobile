@@ -255,7 +255,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
 
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
             child: Text(
               l10n.tr('appearance'),
               style: Theme.of(context).textTheme.titleMedium,
@@ -274,7 +274,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (value) => _setTheme(value),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
             child: Text(
               l10n.tr('languages'),
               style: Theme.of(context).textTheme.titleMedium,
@@ -293,7 +293,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (value) => _setLanguage(value),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
             child: Text(
               l10n.tr('preferences'),
               style: Theme.of(context).textTheme.titleMedium,
@@ -331,9 +331,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               });
             },
           ),
-          const Divider(height: 24),
+          const Divider(height: 14),
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
+            padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
             child: Text(
               l10n.tr('about'),
               style: Theme.of(context).textTheme.titleMedium,
@@ -344,7 +344,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             visualDensity: VisualDensity.compact,
             leading: const Icon(Icons.info, size: 20),
             title: Text(l10n.tr('appVersion')),
-            subtitle: const Text('1.0.0', style: TextStyle(fontSize: 12)),
+            subtitle: const Text('0.0.1', style: TextStyle(fontSize: 12)),
           ),
           ListTile(
             dense: true,

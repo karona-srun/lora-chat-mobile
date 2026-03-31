@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'chat_detail_screen.dart';
 import '../l10n/app_localizations.dart';
+import '../services/local_database_service.dart';
 import '../utils/json_string_sanitize.dart';
 
 /// Normalizes API `addr` (hex string or integer) to uppercase hex without 0x prefix.
@@ -14,6 +15,8 @@ String _normalizeNodeAddr(dynamic v) {
     if (s.startsWith('0X')) s = s.substring(2);
     s = s.replaceAll(RegExp(r'[\s:-]'), '');
     if (s.isEmpty) return '';
+    // Ignore placeholders/non-address values such as "__SELF__".
+    if (!RegExp(r'^[0-9A-F]+$').hasMatch(s)) return '';
     return s.length <= 4 ? s.padLeft(4, '0') : s;
   }
   if (v is num) {
@@ -28,17 +31,71 @@ String _fieldToString(dynamic v) {
   return v.toString();
 }
 
-class DirectMessagesScreen extends StatefulWidget {
-  const DirectMessagesScreen({super.key});
+class ContactsListScreen extends StatefulWidget {
+  const ContactsListScreen({super.key});
 
   @override
-  State<DirectMessagesScreen> createState() => _DirectMessagesScreenState();
+  State<ContactsListScreen> createState() => _ContactsListScreenState();
 }
 
-class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
+class _ContactsListScreenState extends State<ContactsListScreen> {
   late Future<List<_NodeEntry>> _nodesFuture;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  final Set<String> _removedAddrs = <String>{};
+
+  Future<List<_NodeEntry>> _loadCachedContacts() async {
+    try {
+      final db = await LocalDatabaseService.instance.database;
+      final rows = await db.query(
+        'contacts',
+        columns: ['lora_address', 'display_name'],
+        orderBy: 'updated_at DESC, created_at DESC',
+      );
+      return rows
+          .map((row) {
+            final contact = ContactRecord.fromMap(row);
+            final addr = _normalizeNodeAddr(contact.loraAddress);
+            if (addr.isEmpty) return null;
+            final name = contact.displayName.trim();
+            return _NodeEntry(
+              addr: addr,
+              name: name.isNotEmpty ? name : '0x$addr',
+              rssi: '',
+              lastSeen: '',
+              online: false,
+              repeater: false,
+              callSign: '',
+              crypt: '',
+              netId: '',
+              channel: '',
+            );
+          })
+          .whereType<_NodeEntry>()
+          .toList();
+    } catch (e) {
+      debugPrint('Failed to load cached contacts: $e');
+      return const [];
+    }
+  }
+
+  Future<void> _saveContactsToLocal(List<_NodeEntry> nodes) async {
+    if (nodes.isEmpty) return;
+    try {
+      for (final node in nodes) {
+        await LocalDatabaseService.instance.upsertContact(
+          ContactRecord(
+            loraAddress: node.addr,
+            displayName: node.name.trim().isEmpty
+                ? '0x${node.addr}'
+                : node.name,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Failed to save contacts locally: $e');
+    }
+  }
 
   @override
   void initState() {
@@ -57,6 +114,11 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
 
   Future<List<_NodeEntry>> _fetchNodes() async {
     try {
+      final cachedNodes = await _loadCachedContacts();
+      final mergedByAddr = <String, _NodeEntry>{
+        for (final node in cachedNodes) node.addr: node,
+      };
+
       final prefs = await SharedPreferences.getInstance();
       final savedIp = prefs.getString('device_ip')?.trim();
       final savedPort = prefs.getString('device_port')?.trim();
@@ -65,7 +127,10 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
       final port = (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
 
       if (ip.isEmpty) {
-        return const [];
+        for (final addr in _removedAddrs) {
+          mergedByAddr.remove(addr);
+        }
+        return mergedByAddr.values.toList();
       }
 
       final uri = Uri.parse(
@@ -79,7 +144,10 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
           );
 
       if (response.statusCode != 200) {
-        return const [];
+        for (final addr in _removedAddrs) {
+          mergedByAddr.remove(addr);
+        }
+        return mergedByAddr.values.toList();
       }
 
       final body = utf8.decode(response.bodyBytes, allowMalformed: true);
@@ -183,10 +251,21 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
         }
       }
 
-      return parsed;
+      await _saveContactsToLocal(parsed);
+
+      for (final node in parsed) {
+        mergedByAddr[node.addr] = node;
+      }
+
+      for (final addr in _removedAddrs) {
+        mergedByAddr.remove(addr);
+      }
+
+      return mergedByAddr.values.toList();
     } catch (e) {
       debugPrint('Failed to load nodes: $e');
-      return const [];
+      final cached = await _loadCachedContacts();
+      return cached.where((n) => !_removedAddrs.contains(n.addr)).toList();
     }
   }
 
@@ -195,6 +274,55 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
       _nodesFuture = _fetchNodes();
     });
     await _nodesFuture;
+  }
+
+  Future<void> _removeContact(_NodeEntry node) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Remove contact'),
+          content: Text('Remove ${node.name} (0x${node.addr}) from contacts?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Remove'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      final db = await LocalDatabaseService.instance.database;
+      await db.delete(
+        'contacts',
+        where: 'lora_address = ?',
+        whereArgs: [node.addr],
+      );
+      _removedAddrs.add(node.addr);
+      if (!mounted) return;
+      await _refresh();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Contact removed')));
+    } catch (e) {
+      debugPrint('Failed to remove contact: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to remove contact'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   /// Up to 3 letters (e.g. "BBS") like the reference list row.
@@ -271,8 +399,12 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 1,
+      shape: 
+      RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.grey),
+      ),
+      elevation: 0,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () {
@@ -283,194 +415,218 @@ class _DirectMessagesScreenState extends State<DirectMessagesScreen> {
             ),
           );
         },
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 8, 12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Column(
-                mainAxisSize: MainAxisSize.min,
+        child: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: mint,
-                    child: Text(
-                      _avatarLetters(node.name),
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.black87,
-                        letterSpacing: 0.2,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
+                  Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        node.online
-                            ? Icons.online_prediction_rounded
-                            : Icons.online_prediction_rounded,
-                        size: 18,
-                        color: node.online ? const Color(0xFF2E7D32) : muted,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        node.online ? 'Online' : 'Offline',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: node.online ? const Color(0xFF2E7D32) : muted,
-                          letterSpacing: 0.3,
+                      CircleAvatar(
+                        radius: 28,
+                        backgroundColor: mint,
+                        child: Text(
+                          _avatarLetters(node.name),
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.black87,
+                            letterSpacing: 0.2,
+                          ),
                         ),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            node.online
+                                ? Icons.online_prediction_rounded
+                                : Icons.online_prediction_rounded,
+                            size: 18,
+                            color: node.online
+                                ? const Color(0xFF2E7D32)
+                                : muted,
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            node.online ? 'Online' : 'Offline',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: node.online
+                                  ? const Color(0xFF2E7D32)
+                                  : muted,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                ],
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Icon(
-                            _cryptEnabled(node.crypt)
-                                ? Icons.lock_outline
-                                : Icons.lock_open_outlined,
-                            size: 18,
-                            color: _cryptEnabled(node.crypt)
-                                ? const Color(0xFF2E7D32)
-                                : const Color.fromARGB(255, 213, 157, 0),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Icon(
+                                _cryptEnabled(node.crypt)
+                                    ? Icons.lock_outline
+                                    : Icons.lock_open_outlined,
+                                size: 18,
+                                color: _cryptEnabled(node.crypt)
+                                    ? const Color(0xFF2E7D32)
+                                    : const Color.fromARGB(255, 213, 157, 0),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    node.name,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.titleSmall?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.black87,
-                                      height: 1.25,
-                                    ),
-                                  ),
-                                  if (node.name.toUpperCase() !=
-                                      '0X${node.addr}') ...[
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      '0x${node.addr}',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: muted,
-                                        height: 1.2,
+                                  Row(
+                                    children: [
+                                      Text(
+                                        node.name,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.titleSmall
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w700,
+                                              color: Colors.black87,
+                                              height: 1.25,
+                                            ),
                                       ),
-                                    ),
-                                  ],
+                                      if (node.name.toUpperCase() !=
+                                          '0X${node.addr}') ...[
+                                        const SizedBox(width: 10),
+                                        Text(
+                                          '0x${node.addr}',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: muted,
+                                            height: 1.2,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
                                 ],
                               ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    _meshMetaRow(
-                      leading: Container(
-                        width: 22,
-                        height: 22,
-                        alignment: Alignment.center,
-                        decoration: const BoxDecoration(
-                          color: moonCircle,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          Icons.nights_stay_rounded,
-                          size: 12,
-                          color: Colors.deepOrange.shade700,
-                        ),
-                      ),
-                      text: _formatNodeLastSeen(node),
-                      mutedColor: muted,
-                    ),
-                    // if (_networkSummary(node).isNotEmpty) ...[
-                    //   const SizedBox(height: 4),
-                    //   _meshMetaRow(
-                    //     leading: Icon(
-                    //       Icons.hub_outlined,
-                    //       size: 16,
-                    //       color: muted,
-                    //     ),
-                    //     text: _networkSummary(node),
-                    //     mutedColor: muted,
-                    //   ),
-                    // ],
-                    const SizedBox(height: 4),
-                    _meshMetaRow(
-                      leading: Icon(
-                        Icons.settings_remote_outlined,
-                        size: 16,
-                        color: muted,
-                      ),
-                      text: node.repeater ? 'Role: Repeater' : 'Role: Client',
-                      mutedColor: muted,
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.directions_run_rounded,
-                          size: 17,
-                          color: Colors.black87,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'RSSI: ',
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            color: muted,
-                            height: 1.2,
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 7,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black87,
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Text(
-                            node.rssi.isNotEmpty ? '${node.rssi} dBm' : '—',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white,
-                              height: 1.1,
+                        const SizedBox(height: 4),
+                        _meshMetaRow(
+                          leading: Container(
+                            width: 22,
+                            height: 22,
+                            alignment: Alignment.center,
+                            decoration: const BoxDecoration(
+                              color: moonCircle,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.nights_stay_rounded,
+                              size: 12,
+                              color: Colors.deepOrange.shade700,
                             ),
                           ),
+                          text: _formatNodeLastSeen(node),
+                          mutedColor: muted,
+                        ),
+                        // if (_networkSummary(node).isNotEmpty) ...[
+                        //   const SizedBox(height: 4),
+                        //   _meshMetaRow(
+                        //     leading: Icon(
+                        //       Icons.hub_outlined,
+                        //       size: 16,
+                        //       color: muted,
+                        //     ),
+                        //     text: _networkSummary(node),
+                        //     mutedColor: muted,
+                        //   ),
+                        // ],
+                        const SizedBox(height: 4),
+                        _meshMetaRow(
+                          leading: Icon(
+                            Icons.settings_remote_outlined,
+                            size: 16,
+                            color: muted,
+                          ),
+                          text: node.repeater
+                              ? 'Role: Repeater'
+                              : 'Role: Client',
+                          mutedColor: muted,
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.directions_run_rounded,
+                              size: 17,
+                              color: Colors.black87,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              'RSSI: ',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: muted,
+                                height: 1.2,
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black87,
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: Text(
+                                node.rssi.isNotEmpty ? '${node.rssi} dBm' : '—',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.white,
+                                  height: 1.1,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
-                ),
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                    color: muted.withValues(alpha: 0.7),
+                  ),
+                ],
               ),
-              Icon(Icons.chevron_right, color: muted.withValues(alpha: 0.7)),
-            ],
-          ),
+            ),
+            Positioned(
+              top: 0,
+              right: 0,
+              child: IconButton(
+                tooltip: 'Remove contact',
+                icon: const Icon(Icons.delete_outline),
+                color: Colors.redAccent,
+                onPressed: () => _removeContact(node),
+              ),
+            ),
+          ],
         ),
       ),
     );

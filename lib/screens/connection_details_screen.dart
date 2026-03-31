@@ -23,7 +23,7 @@ class ConnectionDetailsScreen extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
         children: [
           ConnectionDetailsHeaderCard(displayName: displayName),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           ConnectionDetailsEntriesList(entries: entries),
         ],
       ),

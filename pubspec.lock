@@ -261,6 +261,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.20.2"
+  khmer_fonts:
+    dependency: "direct main"
+    description:
+      name: khmer_fonts
+      sha256: df3ae73289d973e3dd8cc1ec2b879168fa7f0d84308c389df54302fea21565f0
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.0.6"
   leak_tracker:
     dependency: transitive
     description:

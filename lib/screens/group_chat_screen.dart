@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/local_database_service.dart';
 import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
+import '../l10n/app_localizations.dart';
 
 class GroupChatScreen extends StatefulWidget {
   const GroupChatScreen({
@@ -36,7 +37,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   String _selfCallSign = '';
   String _selfAddr = '';
   String _lastRxText = '';
-
+  int _currentMessageLength = 0;
 
   @override
   void initState() {
@@ -129,9 +130,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   String _targetLabel() {
-    if (_targetHexes.isEmpty) return 'No target members';
-    if (_targetHexes.length == 1) return '1 member';
-    return '${_targetHexes.length} members';
+    if (_targetHexes.isEmpty) return AppLocalizations.of(context).tr('noMembers');
+    if (_targetHexes.length == 1) return '2 ${AppLocalizations.of(context).tr('members')}';
+    return '${_targetHexes.length + 1} ${AppLocalizations.of(context).tr('members')}';
   }
 
   /// Device JSON may include raw LoRa payloads; strict UTF-8 on [http.Response.body] throws.
@@ -326,6 +327,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       );
     });
     _messageController.clear();
+    setState(() {
+      _currentMessageLength = 0;
+    });
     _scrollToBottom();
 
     try {
@@ -355,6 +359,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           }
         } catch (_) {
           failedCount += 1;
+          setState(() {
+            _currentMessageLength = 0;
+          });
         }
       }
 
@@ -369,6 +376,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       }
     } catch (e) {
       _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+      setState(() {
+        _currentMessageLength = 0;
+      });
       if (!mounted) return;
       // ScaffoldMessenger.of(context).showSnackBar(
       //   SnackBar(
@@ -384,6 +394,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     setState(() {
       _messages[index] = _messages[index].copyWith(deliveryStatus: status);
     });
+  }
+
+  void _dismissKeyboard() {
+    final currentFocus = FocusScope.of(context);
+    if (!currentFocus.hasPrimaryFocus && currentFocus.focusedChild != null) {
+      currentFocus.unfocus();
+    }
   }
 
   @override
@@ -414,56 +431,120 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: _messages.isEmpty
-                ? Center(
-                    child: Text(
-                      'No messages yet',
-                      style: TextStyle(color: Colors.grey[600], fontSize: 14),
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      return ChatBubble(message: _messages[index]);
-                    },
-                  ),
-          ),
-          SafeArea(
-            top: false,
-            minimum: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _sendMessage(),
-                    minLines: 1,
-                    maxLines: 4,
-                    decoration: const InputDecoration(
-                      hintText: 'Type a message...',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: _dismissKeyboard,
+        child: Column(
+          children: [
+            Expanded(
+              child: _messages.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No messages yet',
+                        style: TextStyle(color: Colors.grey[600], fontSize: 14),
                       ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        return ChatBubble(message: _messages[index]);
+                      },
                     ),
+            ),
+            Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Theme.of(context).scaffoldBackgroundColor,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 6,
+                    offset: const Offset(0, -2),
+                  ),
+                ],
+              ),
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .surfaceVariant
+                                    .withOpacity(0.9),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              child: TextField(
+                                controller: _messageController,
+                                decoration: const InputDecoration(
+                                  hintText: 'Type a message...',
+                                  border: InputBorder.none,
+                                  counterText: '',
+                                ),
+                                maxLines: 4,
+                                minLines: 1,
+                                maxLength: 50,
+                                textCapitalization: TextCapitalization.sentences,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _currentMessageLength = value.length.clamp(0, 50);
+                                  });
+                                },
+                                onSubmitted: (_) => _sendMessage(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          SizedBox(
+                            height: 44,
+                            width: 44,
+                            child: ElevatedButton(
+                              onPressed: _sendMessage,
+                              style: ElevatedButton.styleFrom(
+                                padding: EdgeInsets.zero,
+                                shape: const CircleBorder(),
+                                elevation: 1,
+                              ),
+                              child: Image.asset(
+                                'assets/icons/send.png',
+                                width: 22,
+                                height: 22,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Text(
+                          '${_currentMessageLength} / 50',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                fontSize: 11,
+                                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                IconButton(
-                  onPressed: _sendMessage,
-                  icon: const Icon(Icons.send),
-                ),
-              ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

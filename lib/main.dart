@@ -2,6 +2,7 @@ import 'package:another_flutter_splash_screen/another_flutter_splash_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:khmer_fonts/khmer_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'l10n/app_localizations.dart';
 import 'screens/group_screen.dart';
@@ -96,6 +97,10 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
       title: 'Lomhor',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        textTheme: ThemeData.light().textTheme.apply(
+          fontFamily: KhmerFonts.hanuman,
+          package: 'khmer_fonts',
+        ),
         colorScheme: ColorScheme.light(
           primary: Colors.black,
           onPrimary: Colors.white,
@@ -141,6 +146,10 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
+        textTheme: ThemeData.dark().textTheme.apply(
+          fontFamily: KhmerFonts.hanuman,
+          package: 'khmer_fonts',
+        ),
         colorScheme: ColorScheme.dark(
           primary: Colors.white,
           onPrimary: Colors.black,

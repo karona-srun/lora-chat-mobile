@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/local_database_service.dart';
+import '../l10n/app_localizations.dart';
 
 class CreatedGroupPayload {
   const CreatedGroupPayload({
@@ -146,15 +147,15 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   Future<void> _createGroup() async {
     final groupName = _nameController.text.trim();
     if (groupName.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a group name')),
-      );
+      // ScaffoldMessenger.of(context).showSnackBar(
+      //   const SnackBar(content: Text('Please enter a group name')),
+      // );
       return;
     }
     if (_selectedContactIds.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select at least one member')),
-      );
+      // ScaffoldMessenger.of(context).showSnackBar(
+      //   const SnackBar(content: Text('Please select at least one member')),
+      // );
       return;
     }
     setState(() => _isSubmitting = true);
@@ -197,7 +198,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Create Group'),
+        title: Text(AppLocalizations.of(context).tr('createGroup'), style: Theme.of(context).textTheme.titleLarge,),
         actions: [
           TextButton(
             onPressed: (_isSubmitting || _isLoading) ? null : _createGroup,
@@ -207,7 +208,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Text('Create'),
+                : Text(AppLocalizations.of(context).tr('create'), style: Theme.of(context).textTheme.bodySmall,),
           ),
         ],
       ),
@@ -221,8 +222,8 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                 controller: _nameController,
                 textInputAction: TextInputAction.next,
                 decoration: InputDecoration(
-                  labelText: 'Group name',
-                  hintText: 'Enter group name',
+                  labelText: AppLocalizations.of(context).tr('groupName'),
+                  hintText: AppLocalizations.of(context).tr('groupNamePlaceholder'),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -240,12 +241,12 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Row(
               children: [
-                const Text(
-                  'Select members',
+                Text(
+                  AppLocalizations.of(context).tr('selectMembers'),
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(width: 8),
-                Text('(${_selectedContactIds.length} selected)'),
+                Text('(${_selectedContactIds.length} ${AppLocalizations.of(context).tr('selected')})', style: Theme.of(context).textTheme.bodySmall,),
               ],
             ),
           ),

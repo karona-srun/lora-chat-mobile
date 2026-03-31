@@ -33,7 +33,7 @@ class ConnectionDetailsHeaderCard extends StatelessWidget {
                 color: colorScheme.onPrimaryContainer,
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -101,50 +101,57 @@ class ConnectionDetailEntryCard extends StatelessWidget {
 
     return Card(
       elevation: 0,
+      color: colorScheme.surfaceContainerHigh.withValues(alpha: 0.45),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
         side: BorderSide(
           color: colorScheme.outlineVariant,
         ),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 10,
+          horizontal: 10,
+          vertical: 8,
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
-              width: 34,
-              height: 34,
+              width: 30,
+              height: 30,
               decoration: BoxDecoration(
                 color: colorScheme.primaryContainer.withValues(alpha: 0.7),
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: BorderRadius.circular(8),
               ),
               child: Icon(
                 entry.icon,
-                size: 18,
+                size: 16,
                 color: colorScheme.onPrimaryContainer,
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
                     entry.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelMedium?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(height: 3),
+                  const SizedBox(height: 2),
                   Text(
                     entry.value.isEmpty ? '-' : entry.value,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodyLarge?.copyWith(
                       fontWeight: FontWeight.w600,
+                      fontSize: 12,
                     ),
                   ),
                 ],
@@ -171,14 +178,19 @@ class ConnectionDetailsEntriesList extends StatelessWidget {
       return const ConnectionDetailsEmptyCard();
     }
 
-    return Column(
-      children: [
-        for (final entry in entries)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 5),
-            child: ConnectionDetailEntryCard(entry: entry),
-          ),
-      ],
+    return GridView.builder(
+      itemCount: entries.length,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
+        childAspectRatio: 2.25,
+      ),
+      itemBuilder: (context, index) {
+        return ConnectionDetailEntryCard(entry: entries[index]);
+      },
     );
   }
 }

@@ -85,6 +85,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
       if (response == null) return null;
 
       final body = _decodeResponseBody(response);
+
+     
       final trimmed = body.trimLeft();
       if (trimmed.startsWith('{')) {
         dynamic decoded;
@@ -208,6 +210,21 @@ class _ConnectScreenState extends State<ConnectScreen> {
       list.add(_ConfigItem(label: label, value: v));
     }
 
+    bool? asBool(dynamic value) {
+      if (value is bool) return value;
+      if (value is num) return value != 0;
+      if (value is String) {
+        final normalized = value.trim().toLowerCase();
+        if (normalized == 'true' || normalized == 'yes' || normalized == '1') {
+          return true;
+        }
+        if (normalized == 'false' || normalized == 'no' || normalized == '0') {
+          return false;
+        }
+      }
+      return null;
+    }
+
     final nodeStatus = <_ConfigItem>[];
 
     final myAddr = (node['myAddr']?.toString().trim().toUpperCase() ?? '');
@@ -224,7 +241,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
     add(nodeStatus, 'Uptime', node['uptime']?.toString() ?? '');
     add(nodeStatus, 'Battery', '${node['battery']?.toString() ?? ''}%');
-    add(nodeStatus, 'Charging', node['charging'] == true ? 'Yes' : 'No');
+    final charging = asBool(node['charging']);
+    if (charging != null) {
+      add(nodeStatus, 'Charging', charging ? 'Yes' : 'No');
+    }
 
     final ready = node['ready'];
     if (ready is bool) {
@@ -912,33 +932,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 6),
         children: [
-          // Connection status card
-          Container(
-            // padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-            // decoration: BoxDecoration(
-            //   color: colorScheme.surfaceVariant.withOpacity(0.35),
-            //   borderRadius: BorderRadius.circular(12),
-            // ),
-            child: Row(
-              children: [
-                // Icon(
-                //   Icons.link_off,
-                //   color: Colors.redAccent,
-                //   size: 32,
-                // ),
-                // const SizedBox(width: 12),
-                // const Expanded(
-                //   child: Text(
-                //     'No device connected',
-                //     style: TextStyle(
-                //       fontSize: 16,
-                //       fontWeight: FontWeight.w600,
-                //     ),
-                //   ),
-                // ),
-              ],
-            ),
-          ),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -1047,35 +1040,68 @@ class _ConnectScreenState extends State<ConnectScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      Icon(
-                                        isConnected
-                                            ? Icons.check_circle
-                                            : Icons.link_off,
-                                        size: 16,
-                                        color: isConnected
-                                            ? Colors.green
-                                            : Colors.redAccent,
+                                      Expanded(
+                                        child: Row(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Icon(
+                                              isConnected
+                                                  ? Icons.check_circle
+                                                  : Icons.link_off,
+                                              size: 16,
+                                              color: isConnected
+                                                  ? Colors.green
+                                                  : Colors.redAccent,
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Text(
+                                                    status != null
+                                                        ? status.displayName
+                                                        : l10n.tr('disconnected'),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 2),
+                                                  Text(
+                                                    status != null
+                                                        ? status.endpoint
+                                                        : l10n.tr(
+                                                            'disconnectedMessage',
+                                                          ),
+                                                    maxLines: 2,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      fontSize: 12,
+                                                      color: colorScheme
+                                                          .onSurfaceVariant,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
+                                        ),
                                       ),
                                       const SizedBox(width: 4),
-                                      Expanded(
-                                        child: Text(
-                                          status != null
-                                              ? status.displayName
-                                              : 'Disconnected',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.w400,
-                                          ),
-                                        ),
-                                      ),
                                       IconButton(
-                                        icon: const Icon(
-                                          Icons.refresh,
-                                          size: 20,
-                                        ),
+                                        icon: const Icon(Icons.refresh, size: 20),
                                         padding: EdgeInsets.zero,
                                         constraints: const BoxConstraints(
                                           minWidth: 32,

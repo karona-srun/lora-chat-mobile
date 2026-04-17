@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../utils/json_string_sanitize.dart';
+import '../services/local_database_service.dart';
 
 const String _backgroundTaskName = 'lomhor.message.background.poll';
 const String _backgroundTaskUniqueName = 'lomhor.message.background.unique';
@@ -24,6 +25,7 @@ void messageBackgroundCallbackDispatcher() {
 
 class MessageBackgroundService {
   MessageBackgroundService._();
+  static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -109,6 +111,18 @@ class MessageBackgroundService {
 
       await prefs.setString('message_last_received_text', lastRx);
 
+      if (lastRx.startsWith('GROUP_INVITE|')) {
+        await _handleGroupInvite(lastRx);
+      }
+      if (lastRx.startsWith('GROUP_REMOVE|')) {
+        await _handleGroupRemove(lastRx);
+      }
+      if (lastRx.startsWith('GROUP_LEAVE|')) {
+        await _handleGroupLeave(lastRx);
+      }
+
+      await _persistIncomingMessage(lastRx);
+
       final incoming = _parseIncomingMessage(lastRx);
       if (incoming == null) return;
 
@@ -131,8 +145,120 @@ class MessageBackgroundService {
     return data;
   }
 
+  static String _normalizeAddress(String value) {
+    var text = value.trim().toUpperCase();
+    if (text.startsWith('0X')) text = text.substring(2);
+    text = text.replaceAll(RegExp(r'[\s:-]'), '');
+    if (text.isEmpty) return '';
+    if (!RegExp(r'^[0-9A-F]+$').hasMatch(text)) return '';
+    return text.length <= 4 ? text.padLeft(4, '0') : text;
+  }
+
+  static Future<void> _handleGroupInvite(String raw) async {
+    final parts = raw.split('|');
+    if (parts.length < 4) return;
+
+    final groupUuid = parts[1].trim();
+    final groupName = parts[2].trim();
+    final ownerAddrRaw = parts[3].trim();
+    final membersRaw = parts.length > 4 ? parts[4].trim() : '';
+
+    if (groupUuid.isEmpty || groupName.isEmpty) return;
+
+    final ownerAddr = _normalizeAddress(ownerAddrRaw);
+    if (ownerAddr.isEmpty) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final myAddrPref =
+        (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim();
+    final myAddr = _normalizeAddress(myAddrPref);
+
+    await LocalDatabaseService.instance.ensureInitialized();
+
+    Future<int> ensureContact(String addr) {
+      final displayName = '0x$addr';
+      return LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: addr,
+          displayName: displayName,
+        ),
+      );
+    }
+
+    final ownerContactId = await ensureContact(ownerAddr);
+
+    final groupId = await LocalDatabaseService.instance.upsertGroup(
+      GroupRecord(
+        groupUuid: groupUuid,
+        groupName: groupName,
+        ownerContactId: ownerContactId,
+      ),
+    );
+
+    final memberAddrs = <String>{};
+    if (ownerAddr.isNotEmpty) memberAddrs.add(ownerAddr);
+    if (membersRaw.isNotEmpty) {
+      for (final part in membersRaw.split(',')) {
+        final addr = _normalizeAddress(part);
+        if (addr.isNotEmpty) {
+          memberAddrs.add(addr);
+        }
+      }
+    }
+
+    if (myAddr.isNotEmpty) {
+      memberAddrs.add(myAddr);
+    }
+
+    for (final addr in memberAddrs) {
+      final contactId = await ensureContact(addr);
+      final role = addr == ownerAddr
+          ? GroupMemberRole.owner
+          : GroupMemberRole.member;
+
+      await LocalDatabaseService.instance.upsertGroupMember(
+        GroupMemberRecord(
+          groupId: groupId,
+          contactId: contactId,
+          role: role,
+          isActive: true,
+        ),
+      );
+    }
+  }
+
+  static Future<void> _handleGroupRemove(String raw) async {
+    final parts = raw.split('|');
+    if (parts.length < 2) return;
+    final groupUuid = parts[1].trim();
+    if (groupUuid.isEmpty) return;
+
+    await LocalDatabaseService.instance.ensureInitialized();
+    await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
+  }
+
+  static Future<void> _handleGroupLeave(String raw) async {
+    // Format: GROUP_LEAVE|<groupUuid>|<contactId>
+    final parts = raw.split('|');
+    if (parts.length < 3) return;
+    final groupUuid = parts[1].trim();
+    final contactIdStr = parts[2].trim();
+    if (groupUuid.isEmpty || contactIdStr.isEmpty) return;
+    final contactId = int.tryParse(contactIdStr);
+    if (contactId == null) return;
+
+    await LocalDatabaseService.instance.ensureInitialized();
+    await LocalDatabaseService.instance.deactivateGroupMemberByUuid(
+      groupUuid: groupUuid,
+      contactId: contactId,
+    );
+  }
+
   static _IncomingMessage? _parseIncomingMessage(String message) {
     if (message.startsWith('HELLO|')) return null;
+    if (message.startsWith('GROUP_INVITE|')) return null;
+    if (message.startsWith('GROUP_REMOVE|')) return null;
+    if (message.startsWith('GROUP_LEAVE|')) return null;
     if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(message)) {
       return null;
     }
@@ -154,15 +280,171 @@ class MessageBackgroundService {
       caseSensitive: false,
     ).firstMatch(message);
     if (relay != null) {
-      final destHex = (relay.group(1) ?? '').toUpperCase();
       final text = (relay.group(2) ?? '').trim();
       if (text.isEmpty) return null;
-      return _IncomingMessage(sender: 'Via relay -> 0x$destHex', text: text);
+      // return _IncomingMessage(sender: 'Via relay -> 0x$destHex', text: text);
+      return _IncomingMessage(sender: 'New message', text: text);
     }
 
     debugPrint('New message: $message');
 
     return _IncomingMessage(sender: 'New message', text: message);
+  }
+
+  static String _newMessageUuid(String prefix) {
+    return '${prefix}_${DateTime.now().microsecondsSinceEpoch}';
+  }
+
+  static String _sanitizeIncomingText(String raw) {
+    var text = raw.trim();
+    text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
+    text = text.replaceFirst(RegExp(r'[^\x20-\x7E]+$'), '').trimRight();
+    return text;
+  }
+
+  static ({String? senderName, String text}) _splitSenderFromPayload(
+    String payload,
+  ) {
+    var trimmed = payload.trim();
+    if (trimmed.isEmpty) return (senderName: null, text: '');
+
+    final numericPrefix = RegExp(r'^\d+\|').firstMatch(trimmed);
+    if (numericPrefix != null) {
+      trimmed = trimmed.substring(numericPrefix.end).trimLeft();
+      if (trimmed.isEmpty) return (senderName: null, text: '');
+    }
+
+    final colonMatch = RegExp(r'^([^:]{1,24})\s*:\s*(.+)$').firstMatch(trimmed);
+    if (colonMatch != null) {
+      final sender = (colonMatch.group(1) ?? '').trim();
+      final text = _sanitizeIncomingText(colonMatch.group(2) ?? '');
+      if (sender.isNotEmpty && text.isNotEmpty) {
+        return (senderName: sender, text: text);
+      }
+    }
+    return (senderName: null, text: _sanitizeIncomingText(trimmed));
+  }
+
+  static Future<int> _ensureSelfContact() async {
+    final prefs = await SharedPreferences.getInstance();
+    final myCallSign = (prefs.getString('callSign') ?? '').trim();
+    final myAddr = _normalizeAddress(
+      (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
+    );
+    return LocalDatabaseService.instance.upsertContact(
+      ContactRecord(
+        loraAddress: myAddr.isNotEmpty ? myAddr : '__SELF__',
+        displayName: myCallSign.isNotEmpty ? myCallSign : 'You',
+      ),
+    );
+  }
+
+  static Future<void> _persistIncomingMessage(String raw) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
+    if (!saveDbEnabled) return;
+
+    if (_isIgnoredStatusNoise(raw)) return;
+    if (raw.startsWith('GROUP_INVITE|') ||
+        raw.startsWith('GROUP_REMOVE|') ||
+        raw.startsWith('GROUP_LEAVE|')) {
+      return;
+    }
+
+    await LocalDatabaseService.instance.ensureInitialized();
+    final selfContactId = await _ensureSelfContact();
+
+    final fromTagged = RegExp(
+      r'^From 0x([0-9A-Fa-f]{2,4})\s*:\s*(.+)$',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    if (fromTagged != null) {
+      final fromAddr = _normalizeAddress(fromTagged.group(1) ?? '');
+      final parsed = _splitSenderFromPayload(fromTagged.group(2) ?? '');
+      if (fromAddr.isEmpty || parsed.text.isEmpty) return;
+
+      final fromContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: fromAddr,
+          displayName: parsed.senderName ?? 'Node 0x$fromAddr',
+        ),
+      );
+
+      await LocalDatabaseService.instance.insertMessage(
+        MessageRecord(
+          messageUuid: _newMessageUuid('dm'),
+          chatType: ChatType.direct,
+          fromContactId: fromContactId,
+          toContactId: selfContactId,
+          payload: parsed.text,
+          deliveryStatus: DeliveryStatus.delivered,
+          receivedAt: DateTime.now().toUtc().toIso8601String(),
+        ),
+      );
+
+      final fromGroups =
+          await LocalDatabaseService.instance.listActiveGroupIdsForContact(
+        fromContactId,
+      );
+      if (fromGroups.isEmpty) return;
+      final selfGroups =
+          await LocalDatabaseService.instance.listActiveGroupIdsForContact(
+        selfContactId,
+      );
+      final selfGroupSet = selfGroups.toSet();
+      for (final groupId in fromGroups) {
+        if (!selfGroupSet.contains(groupId)) continue;
+        await LocalDatabaseService.instance.insertMessage(
+          MessageRecord(
+            messageUuid: _newMessageUuid('grp_$groupId'),
+            chatType: ChatType.group,
+            fromContactId: fromContactId,
+            groupId: groupId,
+            payload: parsed.text,
+            deliveryStatus: DeliveryStatus.delivered,
+            receivedAt: DateTime.now().toUtc().toIso8601String(),
+          ),
+        );
+      }
+      return;
+    }
+
+    final plain = _splitSenderFromPayload(raw);
+    if (plain.text.isEmpty || plain.senderName == null) return;
+
+    final sender = plain.senderName!.trim();
+    if (sender.isEmpty) return;
+    final senderContactId = await LocalDatabaseService.instance.upsertContact(
+      ContactRecord(
+        loraAddress: '__GROUP_SENDER__${sender.toUpperCase()}',
+        displayName: sender,
+      ),
+    );
+    final senderGroups =
+        await LocalDatabaseService.instance.listActiveGroupIdsForContact(
+      senderContactId,
+    );
+    for (final groupId in senderGroups) {
+      await LocalDatabaseService.instance.insertMessage(
+        MessageRecord(
+          messageUuid: _newMessageUuid('grp_$groupId'),
+          chatType: ChatType.group,
+          fromContactId: senderContactId,
+          groupId: groupId,
+          payload: plain.text,
+          deliveryStatus: DeliveryStatus.delivered,
+          receivedAt: DateTime.now().toUtc().toIso8601String(),
+        ),
+      );
+    }
+  }
+
+  static bool _isIgnoredStatusNoise(String message) {
+    if (message.startsWith('HELLO|')) return true;
+    if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(message)) {
+      return true;
+    }
+    return false;
   }
 
   static Future<void> _showNotification({

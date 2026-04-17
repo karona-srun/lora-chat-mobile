@@ -1,4 +1,7 @@
+import 'package:LocalChat/screens/groups_list_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/local_database_service.dart';
 import '../l10n/app_localizations.dart';
 
@@ -20,6 +23,7 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
   bool _loading = true;
   bool _removing = false;
   bool _updatingMembers = false;
+  bool _canRemoveGroup = false;
   bool _editingGroupName = false;
   bool _savingGroupName = false;
   final TextEditingController _groupNameController = TextEditingController();
@@ -60,13 +64,76 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
   String _normalizeAddress(String value) {
     var text = value.trim().toUpperCase();
     if (text.startsWith('0X')) text = text.substring(2);
-    return text.replaceAll(RegExp(r'[\s:-]'), '');
+    text = text.replaceAll(RegExp(r'[\s:-]'), '');
+    // Match how other parts of the app normalize addresses (pad to 4 hex chars).
+    if (text.isEmpty) return '';
+    if (text.length <= 4 && RegExp(r'^[0-9A-F]+$').hasMatch(text)) {
+      return text.padLeft(4, '0');
+    }
+    return text;
+  }
+
+  bool _isSelfPlaceholder(String loraAddress, String displayName) {
+    final normalizedAddress = _normalizeAddress(loraAddress);
+    final normalizedName = displayName.trim().toUpperCase();
+    return normalizedAddress == '__SELF__' || normalizedName == '__SELF__';
   }
 
   bool _isHiddenContact(ContactRecord contact) {
     final normalizedAddress = _normalizeAddress(contact.loraAddress);
     final normalizedName = contact.displayName.trim().toUpperCase();
     return normalizedAddress == '__SELF__' || normalizedName == '__SELF__';
+  }
+
+  Future<bool> _computeCanRemoveGroup(GroupDetailsRecord details) async {
+    // A group can be removed only by its owner.
+    // We determine "owner == me" using a best-effort match:
+    // - Prefer matching the owner member's stored address with our local `myAddr`.
+    // - If the owner member is currently represented by the `__SELF__` placeholder
+    //   (member hide behavior), fall back to enabling only when our own identity
+    //   is not present via address/callSign in the group members list.
+    final prefs = await SharedPreferences.getInstance();
+    final myAddrPref =
+        (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim();
+    final myCallSign = (prefs.getString('callSign') ?? '').trim().toUpperCase();
+
+    final selfAddr = _normalizeAddress(myAddrPref);
+    final members = details.members;
+
+    GroupMemberContactRecord? ownerMember;
+    for (final m in members) {
+      if (m.role == GroupMemberRole.owner) {
+        ownerMember = m;
+        break;
+      }
+    }
+    if (ownerMember == null) return false;
+
+    final ownerMatchesSelfAddr = selfAddr.isNotEmpty &&
+        _normalizeAddress(ownerMember.loraAddress) == selfAddr;
+
+    final selfAddrPresentInMembers = selfAddr.isNotEmpty &&
+        members.any((m) => _normalizeAddress(m.loraAddress) == selfAddr);
+
+    final selfCallSignPresentInMembers = myCallSign.isNotEmpty &&
+        members.any(
+          (m) => m.displayName.trim().toUpperCase() == myCallSign,
+        );
+
+    if (ownerMatchesSelfAddr) return true;
+
+    final ownerIsSelfPlaceholder =
+        _isSelfPlaceholder(ownerMember.loraAddress, ownerMember.displayName);
+
+    // If the owner is shown as `__SELF__`, treat it as "me" only when our own
+    // identity isn't discoverable in the members list by address/callSign.
+    if (ownerIsSelfPlaceholder &&
+        !selfAddrPresentInMembers &&
+        !selfCallSignPresentInMembers) {
+      return true;
+    }
+
+    return false;
   }
 
   Future<void> _loadGroupDetails() async {
@@ -77,12 +144,17 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
       );
       final contacts = await LocalDatabaseService.instance.listContacts();
       if (!mounted) return;
+
+      final canRemoveGroup = details == null
+          ? false
+          : await _computeCanRemoveGroup(details);
       setState(() {
         _details = details;
         _contacts = contacts;
         if (!_editingGroupName && details != null) {
           _groupNameController.text = details.groupName;
         }
+        _canRemoveGroup = canRemoveGroup;
       });
     } catch (_) {
       if (!mounted) return;
@@ -296,7 +368,131 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
     }
   }
 
+  Future<GroupMemberContactRecord?> _resolveSelfMember() async {
+    final details = _details;
+    if (details == null) return null;
+
+    final prefs = await SharedPreferences.getInstance();
+    final myAddrPref =
+        (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim();
+    final myCallSign =
+        (prefs.getString('callSign') ?? '').trim().toUpperCase();
+    final selfAddr = _normalizeAddress(myAddrPref);
+
+    GroupMemberContactRecord? byAddr;
+    if (selfAddr.isNotEmpty) {
+      for (final m in details.members) {
+        if (_normalizeAddress(m.loraAddress) == selfAddr) {
+          byAddr = m;
+          break;
+        }
+      }
+      if (byAddr != null) return byAddr;
+    }
+
+    if (myCallSign.isNotEmpty) {
+      for (final m in details.members) {
+        if (m.displayName.trim().toUpperCase() == myCallSign) {
+          return m;
+        }
+      }
+    }
+    return null;
+  }
+
+  Future<void> _leaveGroup() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(AppLocalizations.of(context).tr('leaveGroup'), style: Theme.of(context).textTheme.titleLarge,),
+          content: Text(AppLocalizations.of(context).tr('leaveGroupConfirmation'), style: Theme.of(context).textTheme.bodyMedium,),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text(AppLocalizations.of(context).tr('cancalButton'), style: Theme.of(context).textTheme.bodyMedium,),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(AppLocalizations.of(context).tr('leaveGroup'), style: Theme.of(context).textTheme.bodyMedium,),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+
+    setState(() => _updatingMembers = true);
+    try {
+      final selfMember = await _resolveSelfMember();
+      if (selfMember == null) {
+        if (mounted) {
+          await _showMessageDialog(
+            message: 'Unable to identify your membership in this group.',
+          );
+        }
+        return;
+      }
+
+      await LocalDatabaseService.instance.upsertGroupMember(
+        GroupMemberRecord(
+          groupId: widget.groupId,
+          contactId: selfMember.contactId,
+          role: selfMember.role,
+          isActive: false,
+        ),
+      );
+
+      // Verify we were removed from members.
+      final refreshed = await LocalDatabaseService.instance.getGroupDetails(
+        widget.groupId,
+      );
+      final stillMember = refreshed?.members.any(
+            (m) => m.contactId == selfMember.contactId && m.role == selfMember.role,
+          ) ??
+          false;
+      if (stillMember) {
+        if (mounted) {
+          await _showMessageDialog(
+            message: 'Failed to leave group. Please try again.',
+          );
+        }
+        return;
+      }
+
+      // Optional: broadcast leave so other devices also remove this member.
+      if (refreshed != null) {
+        await _broadcastGroupLeave(refreshed, selfMember);
+      }
+
+      if (!mounted) return;
+      await _showMessageDialog(
+        message: 'You have left the group.',
+      );
+      if (!mounted) return;
+      await Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const GroupsListScreen()),
+        (route) => false,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      await _showMessageDialog(
+        message: 'Failed to leave group',
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _updatingMembers = false);
+      }
+    }
+  }
+
   Future<void> _removeGroup() async {
+    if (!_canRemoveGroup) {
+      await _showMessageDialog(
+        message: 'Only the group owner can remove this group.',
+      );
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) {
@@ -320,15 +516,128 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
 
     setState(() => _removing = true);
     try {
+      final details = _details;
+      if (details != null) {
+        await _broadcastGroupRemoval(details);
+      }
       await LocalDatabaseService.instance.removeGroup(widget.groupId);
       if (!mounted) return;
-      Navigator.of(context).pop(true);
+      await Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const GroupsListScreen()),
+        (route) => false,
+      );
     } catch (_) {
       if (!mounted) return;
-      setState(() => _removing = false);
-      await _showMessageDialog(
-        message: 'Failed to remove group',
+      if (mounted) {
+        setState(() => _removing = false);
+      }
+    }
+  }
+
+  bool _isValidNodeAddress(String value) {
+    return RegExp(r'^[0-9A-F]{4,}$').hasMatch(value);
+  }
+
+  Future<List<String>> _groupRemovalTargets(GroupDetailsRecord details) async {
+    final prefs = await SharedPreferences.getInstance();
+    final myAddrPref =
+        (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim();
+    final selfAddr = _normalizeAddress(myAddrPref);
+
+    final targets = <String>{};
+    for (final member in details.members) {
+      final addr = _normalizeAddress(member.loraAddress);
+      if (addr.isEmpty || addr == '__SELF__') continue;
+      if (!_isValidNodeAddress(addr)) continue;
+      if (selfAddr.isNotEmpty && addr == selfAddr) continue;
+      targets.add(addr);
+    }
+    return targets.toList()..sort();
+  }
+
+  Future<void> _broadcastGroupRemoval(GroupDetailsRecord details) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedIp = prefs.getString('device_ip')?.trim() ?? '';
+      final savedPort = prefs.getString('device_port')?.trim() ?? '';
+      if (savedIp.isEmpty) return;
+
+      final parsedPort = int.tryParse(savedPort);
+      final uriBase = Uri(
+        scheme: 'http',
+        host: savedIp,
+        port: parsedPort ?? 80,
+        path: '/send',
       );
+
+      final targets = await _groupRemovalTargets(details);
+      if (targets.isEmpty) return;
+
+      final payload = 'GROUP_REMOVE|${details.groupUuid}';
+      for (final target in targets) {
+        try {
+          final uri = uriBase.replace(
+            queryParameters: <String, String>{
+              'msg': payload,
+              'to': target,
+            },
+          );
+          await http.get(uri).timeout(const Duration(seconds: 5));
+        } catch (_) {
+          // Best effort: continue broadcasting to remaining members.
+        }
+      }
+    } catch (_) {
+      // Best effort: allow owner to remove local group even if broadcast fails.
+    }
+  }
+
+  Future<void> _broadcastGroupLeave(
+    GroupDetailsRecord details,
+    GroupMemberContactRecord selfMember,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedIp = prefs.getString('device_ip')?.trim() ?? '';
+      final savedPort = prefs.getString('device_port')?.trim() ?? '';
+      if (savedIp.isEmpty) return;
+
+      final parsedPort = int.tryParse(savedPort);
+      final uriBase = Uri(
+        scheme: 'http',
+        host: savedIp,
+        port: parsedPort ?? 80,
+        path: '/send',
+      );
+
+      final selfAddr = _normalizeAddress(selfMember.loraAddress);
+      final targets = <String>{};
+      for (final member in details.members) {
+        final addr = _normalizeAddress(member.loraAddress);
+        if (addr.isEmpty || addr == '__SELF__') continue;
+        if (!_isValidNodeAddress(addr)) continue;
+        if (selfAddr.isNotEmpty && addr == selfAddr) continue;
+        targets.add(addr);
+      }
+      if (targets.isEmpty) return;
+
+      final payload =
+          'GROUP_LEAVE|${details.groupUuid}|${selfMember.contactId.toString()}';
+      for (final target in targets) {
+        try {
+          final uri = uriBase.replace(
+            queryParameters: <String, String>{
+              'msg': payload,
+              'to': target,
+            },
+          );
+          await http.get(uri).timeout(const Duration(seconds: 5));
+        } catch (_) {
+          // Best effort only.
+        }
+      }
+    } catch (_) {
+      // Ignore broadcast errors; local leave already succeeded.
     }
   }
 
@@ -397,6 +706,10 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(AppLocalizations.of(context).tr('groupDetails'), style: Theme.of(context).textTheme.titleLarge,),
+        leading: IconButton(
+          onPressed: () => Navigator.of(context).pop(),
+          icon: const Icon(Icons.arrow_back_ios_new),
+        ),
         actions: [
           IconButton(
             onPressed: _updatingMembers || _loading || _details == null
@@ -550,8 +863,8 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
                       minimum: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                       child: SizedBox(
                         width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: _removing || _updatingMembers
+                        child: _canRemoveGroup ? ElevatedButton.icon(
+                          onPressed: (!_canRemoveGroup || _removing || _updatingMembers)
                               ? null
                               : _removeGroup,
                           style: ElevatedButton.styleFrom(
@@ -572,11 +885,29 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen> {
                                   ),
                                 )
                               : const Icon(Icons.delete_outline),
-                          label: Text(_removing ? AppLocalizations.of(context).tr('removing') : AppLocalizations.of(context).tr('removeGroup'), 
+                          label: Text(_removing ? AppLocalizations.of(context).tr('removing') : _canRemoveGroup ? AppLocalizations.of(context).tr('leaveGroup') : AppLocalizations.of(context).tr('removeGroup'), 
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 14,
                             fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ): ElevatedButton.icon(
+                          onPressed: _leaveGroup,
+                          icon: const Icon(Icons.person_remove_alt_1),
+                          label: Text(
+                            AppLocalizations.of(context).tr('leaveGroup'), 
+                            style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            ),),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
                             ),
                           ),
                         ),

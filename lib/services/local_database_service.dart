@@ -485,12 +485,11 @@ CREATE TABLE messages (
 
   Future<int> createGroupWithMembers({
     required String groupName,
+    required String groupUuid,
     required int ownerContactId,
     required List<int> memberContactIds,
   }) async {
     final db = await database;
-    final now = DateTime.now().toUtc().microsecondsSinceEpoch;
-    final groupUuid = 'grp_$now';
     final uniqueMembers = <int>{...memberContactIds, ownerContactId}.toList();
 
     return db.transaction((txn) async {
@@ -596,6 +595,41 @@ ORDER BY
     await db.delete('groups', where: 'id = ?', whereArgs: [groupId]);
   }
 
+  Future<void> removeGroupByUuid(String groupUuid) async {
+    final normalized = groupUuid.trim();
+    if (normalized.isEmpty) return;
+    final db = await database;
+    await db.delete(
+      'groups',
+      where: 'group_uuid = ?',
+      whereArgs: [normalized],
+    );
+  }
+
+  Future<void> deactivateGroupMemberByUuid({
+    required String groupUuid,
+    required int contactId,
+  }) async {
+    final normalized = groupUuid.trim();
+    if (normalized.isEmpty) return;
+    final db = await database;
+    final groups = await db.query(
+      'groups',
+      columns: ['id'],
+      where: 'group_uuid = ?',
+      whereArgs: [normalized],
+      limit: 1,
+    );
+    if (groups.isEmpty) return;
+    final groupId = groups.first['id'] as int;
+    await db.update(
+      'group_members',
+      {'is_active': 0},
+      where: 'group_id = ? AND contact_id = ?',
+      whereArgs: [groupId, contactId],
+    );
+  }
+
   Future<int?> insertMessage(MessageRecord message) async {
     final db = await database;
     final insertedId = await db.insert('messages', {
@@ -612,6 +646,51 @@ ORDER BY
     }, conflictAlgorithm: sqflite.ConflictAlgorithm.ignore);
     if (insertedId == 0) return null;
     return insertedId;
+  }
+
+  Future<bool> hasRecentDuplicateIncomingMessage({
+    required ChatType chatType,
+    required int fromContactId,
+    int? toContactId,
+    int? groupId,
+    required String payload,
+    Duration window = const Duration(seconds: 8),
+  }) async {
+    final db = await database;
+    final normalizedPayload = payload.trim();
+    if (normalizedPayload.isEmpty) return false;
+    final cutoff = DateTime.now().toUtc().subtract(window).toIso8601String();
+
+    final rows = await db.rawQuery(
+      '''
+SELECT id
+FROM messages
+WHERE chat_type = ?
+  AND from_contact_id = ?
+  AND payload = ?
+  AND (received_at IS NOT NULL OR delivery_status = ?)
+  AND COALESCE(received_at, created_at, '') >= ?
+  AND (
+    (? IS NULL AND to_contact_id IS NULL) OR to_contact_id = ?
+  )
+  AND (
+    (? IS NULL AND group_id IS NULL) OR group_id = ?
+  )
+LIMIT 1;
+''',
+      [
+        chatType.name,
+        fromContactId,
+        normalizedPayload,
+        DeliveryStatus.delivered.name,
+        cutoff,
+        toContactId,
+        toContactId,
+        groupId,
+        groupId,
+      ],
+    );
+    return rows.isNotEmpty;
   }
 
   Future<void> updateMessageDeliveryStatus({
@@ -644,6 +723,30 @@ ORDER BY
     return rows.map(MessageRecord.fromMap).toList();
   }
 
+  /// Deletes all persisted direct messages between two contacts (both directions).
+  Future<int> deleteDirectMessagesBetween({
+    required int contactA,
+    required int contactB,
+  }) async {
+    final db = await database;
+    return db.delete(
+      'messages',
+      where:
+          "chat_type = 'direct' AND ((from_contact_id = ? AND to_contact_id = ?) OR (from_contact_id = ? AND to_contact_id = ?))",
+      whereArgs: [contactA, contactB, contactB, contactA],
+    );
+  }
+
+  /// Deletes all persisted group chat messages for [groupId].
+  Future<int> deleteGroupMessagesForGroup({required int groupId}) async {
+    final db = await database;
+    return db.delete(
+      'messages',
+      where: "chat_type = 'group' AND group_id = ?",
+      whereArgs: [groupId],
+    );
+  }
+
   Future<List<MessageRecord>> listGroupMessages({
     required int groupId,
     int? limit,
@@ -657,6 +760,46 @@ ORDER BY
       limit: limit,
     );
     return rows.map(MessageRecord.fromMap).toList();
+  }
+
+  Future<List<int>> listActiveGroupIdsForContact(int contactId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      '''
+SELECT group_id
+FROM group_members
+WHERE contact_id = ? AND is_active = 1;
+''',
+      [contactId],
+    );
+    return rows
+        .map((row) => row['group_id'])
+        .whereType<int>()
+        .toSet()
+        .toList();
+  }
+
+  Future<List<int>> listActiveGroupIdsForMemberDisplayName(
+    String displayName,
+  ) async {
+    final normalized = displayName.trim();
+    if (normalized.isEmpty) return const <int>[];
+    final db = await database;
+    final rows = await db.rawQuery(
+      '''
+SELECT DISTINCT gm.group_id AS group_id
+FROM group_members gm
+INNER JOIN contacts c ON c.id = gm.contact_id
+WHERE gm.is_active = 1
+  AND TRIM(UPPER(c.display_name)) = TRIM(UPPER(?));
+''',
+      [normalized],
+    );
+    return rows
+        .map((row) => row['group_id'])
+        .whereType<int>()
+        .toSet()
+        .toList();
   }
 
   Future<void> close() async {

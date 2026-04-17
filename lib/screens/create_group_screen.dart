@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
 
 import '../services/local_database_service.dart';
 import '../l10n/app_localizations.dart';
@@ -105,6 +106,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
           }
         }
       }
+      
       if (selfRecord == null && _selfCallSign.isNotEmpty) {
         for (final contact in uniqueContacts) {
           if (contact.displayName.trim().toUpperCase() == _selfCallSign) {
@@ -173,11 +175,69 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         setState(() => _isSubmitting = false);
         return;
       }
+
+      final groupUuid =
+          'grp_${DateTime.now().toUtc().microsecondsSinceEpoch}';
+
       final groupId = await LocalDatabaseService.instance.createGroupWithMembers(
         groupName: groupName,
+        groupUuid: groupUuid,
         ownerContactId: ownerContactId,
         memberContactIds: sortedSelected,
       );
+
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final savedIp = prefs.getString('device_ip')?.trim();
+        final savedPort = prefs.getString('device_port')?.trim();
+
+        final ip = (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
+        final port = (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
+
+        if (ip.isNotEmpty) {
+          final parsedPort = int.tryParse(port);
+          final uriBase = Uri(
+            scheme: 'http',
+            host: ip,
+            port: parsedPort ?? 80,
+            path: '/send',
+          );
+
+          final targetAddresses = _contacts
+              .where((c) => c.id != null && _selectedContactIds.contains(c.id))
+              .map((c) => _normalizeAddress(c.loraAddress))
+              .where((addr) => addr.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort();
+
+          if (targetAddresses.isNotEmpty) {
+            final invitePayload = StringBuffer()
+              ..write('GROUP_INVITE|')
+              ..write(groupUuid)
+              ..write('|')
+              ..write(groupName)
+              ..write('|')
+              ..write(_selfAddr)
+              ..write('|')
+              ..write(targetAddresses.join(','));
+
+            for (final target in targetAddresses) {
+              try {
+                final uri = uriBase.replace(
+                  queryParameters: <String, String>{
+                    'msg': invitePayload.toString(),
+                    'to': target,
+                  },
+                );
+                await http.get(uri).timeout(
+                  const Duration(seconds: 5),
+                );
+              } catch (_) {}
+            }
+          }
+        }
+      } catch (_) {}
       if (!mounted) return;
       Navigator.of(context).pop(
         CreatedGroupPayload(groupId: groupId, groupName: groupName),

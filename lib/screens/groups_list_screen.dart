@@ -40,6 +40,7 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => GroupChatScreen(
+          key: ValueKey<int>(result.groupId),
           groupId: result.groupId,
           groupTitle: result.groupName,
         ),
@@ -94,7 +95,7 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 28),
                 child: Text(
-                  'No groups yet. Tap + to create a group.',
+                  AppLocalizations.of(context).tr('noGroups'),
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
@@ -145,6 +146,7 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
                     Navigator.of(context).push(
                       MaterialPageRoute(
                         builder: (_) => GroupChatScreen(
+                          key: ValueKey<int>(group.groupId),
                           groupId: group.groupId,
                           groupTitle: name,
                         ),

@@ -37,6 +37,9 @@ class AppLocalizations {
       'selectMembers': 'Select Members',
       'selected': 'selected',
       'removeGroup': 'Remove Group',
+      'leaveGroup': 'Leave Group',  
+      'leaveGroupConfirmation': 'Are you sure you want to leave this group? This action cannot be undone.',
+      'noGroups': 'No groups yet. Tap + to create a group.',
       'removeGroupConfirmation': 'Are you sure you want to remove this group? This action cannot be undone.',
       'removeGroupConfirmationTitle': 'Remove Group',
       'removeGroupConfirmationMessage': 'Are you sure you want to remove this group? This action cannot be undone.',
@@ -69,7 +72,14 @@ class AppLocalizations {
       'connectViaBluetoothSubtitle': 'Connect to a LoRa device via Bluetooth',
       'cancalButton': 'Cancel',
       'connectButton': 'Connect',
-      'detailsMessage':'You can send and receive channel (group chats) and direct messages. From any message you can long press to see available actions like copy, reply, tapback and delete as well as delivery details'
+      'detailsMessage':'You can send and receive channel (group chats) and direct messages. From any message you can long press to see available actions like copy, reply, tapback and delete as well as delivery details',
+      'resend': 'Resend',
+      'deleteHistory': 'Delete History',
+      'deleteHistoryMessage':
+          'Delete all messages in this chat from this device? This cannot be undone.',
+      'deleteHistoryButton': 'Delete',
+      'saveDatabaseLocally': 'Save Database Locally',
+      'saveDatabaseLocallySubtitle': 'Save the database locally on this device',
     },
     'km': {
       'messages': 'សារ',
@@ -100,6 +110,9 @@ class AppLocalizations {
       'selected': 'ជ្រើសរើស',
       'remove': 'លុប',
       'removeGroup': 'លុបក្រុមជជែក',
+      'leaveGroup': 'ចាកចេញក្រុមជជែក',
+      'leaveGroupConfirmation': 'តើអ្នកប្រាកដថាអ្នកចង់ចាកចេញក្រុមជជែកនេះ? ការដំណើរការនេះមិនអាចត្រឡប់មកបានទេ',
+      'noGroups': 'មិនមានក្រុមជជែកទេ។ ចុច + ដើម្បីបង្កើតក្រុមជជែក។',
       'removeGroupConfirmation': 'តើអ្នកប្រាកដទេថាអ្នកចង់លុបក្រុមជជែកនេះ? ការដំណើរការនេះមិនអាចត្រឡប់មកបានទេ',
       'removeGroupConfirmationTitle': 'លុបក្រុមជជែក',
       'removeGroupConfirmationMessage': 'តើអ្នកប្រាកដជាច្រើនទេបើអ្នកចង់លុបជជែកជាក្រុមនេះ? ការដំណើរការនេះមិនអាចត្រឡប់មកបានទេ',
@@ -132,7 +145,14 @@ class AppLocalizations {
       'connectViaBluetoothSubtitle': 'ភ្ជាប់ទៅឧបករណ៍ LoRa តាមរយៈប៊្លូធូស',
       'cancalButton': 'បិទ',
       'connectButton': 'ភ្ជាប់',
-      'detailsMessage': 'អ្នកអាចផ្ញើ និងទទួលសារ (ជជែកជាក្រុម) និងសារផ្ទាល់។ ពីសារណាមួយ អ្នកអាចចុចឱ្យយូរដើម្បីមើលសកម្មភាពដែលមានដូចជា ចម្លង ឆ្លើយតប ប៉ះថយក្រោយ និងលុប ក៏ដូចជាព័ត៌មានលម្អិតនៃការដឹកជញ្ជូន។'
+      'detailsMessage': 'អ្នកអាចផ្ញើ និងទទួលសារ (ជជែកជាក្រុម) និងសារផ្ទាល់។ ពីសារណាមួយ អ្នកអាចចុចឱ្យយូរដើម្បីមើលសកម្មភាពដែលមានដូចជា ចម្លង ឆ្លើយតប ប៉ះថយក្រោយ និងលុប ក៏ដូចជាព័ត៌មានលម្អិតនៃការដឹកជញ្ជូន។',
+      'resend': 'ផ្ញើម្តងទៀត',
+      'deleteHistory': 'លុបប្រវត្តិ',
+      'deleteHistoryMessage':
+          'លុបសារទាំងអស់ក្នុងការជជែកនេះពីឧបករណ៍នេះ? មិនអាចត្រឡប់វិញបានទេ។',
+      'deleteHistoryButton': 'លុប',
+      'saveDatabaseLocally': 'រក្សាទុកទិន្នន័យ',
+      'saveDatabaseLocallySubtitle': 'រក្សាទុកទិន្នន័យក្នុងឧបករណ៍',
     },
   };
 

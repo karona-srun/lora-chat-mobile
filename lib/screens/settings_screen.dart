@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,10 +19,12 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
   bool _darkModeEnabled = false;
   bool _isKhmer = false; // false = English, true = Khmer
   bool _notificationsEnabled = true;
   bool _locationSharingEnabled = false;
+  bool _saveDatabaseLocallyEnabled = false;
   final TextEditingController _usernameController = TextEditingController();
   
   @override
@@ -30,6 +33,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _loadThemePreference();
     _loadLocalePreference();
     _loadProfilePrefs();
+    _loadSaveDatabasePreference();
   }
 
   Future<void> _loadThemePreference() async {
@@ -75,6 +79,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
         );
       });
     }
+  }
+
+  Future<void> _loadSaveDatabasePreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final enabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
+    if (!mounted) return;
+    setState(() => _saveDatabaseLocallyEnabled = enabled);
+  }
+
+  Future<void> _setSaveDatabaseLocally(bool enabled) async {
+    setState(() => _saveDatabaseLocallyEnabled = enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_saveDatabaseLocallyPrefKey, enabled);
   }
 
   Future<bool> _saveUsername() async {
@@ -329,6 +346,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
               setState(() {
                 _locationSharingEnabled = value;
               });
+            },
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
+            child: Text(
+              l10n.tr('saveDatabaseLocally'),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ),
+          SwitchListTile.adaptive(
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+            title: Text(l10n.tr('saveDatabaseLocally')),
+            subtitle: Text(
+              l10n.tr('saveDatabaseLocallySubtitle'),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            value: _saveDatabaseLocallyEnabled,
+            onChanged: (value) {
+              unawaited(_setSaveDatabaseLocally(value));
             },
           ),
           const Divider(height: 14),

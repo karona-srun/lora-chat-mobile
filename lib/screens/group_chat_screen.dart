@@ -28,10 +28,15 @@ class GroupChatScreen extends StatefulWidget {
 
 class _GroupChatScreenState extends State<GroupChatScreen> {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
+  static const String _powerModePrefKey = 'power_mode';
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isConnected = false;
   bool _saveDatabaseLocallyEnabled = false;
+  String _powerMode = 'powerModeBalanced';
+
+  int get _maxMessageLength =>
+      _powerMode == 'powerModeBalanced' ? 100 : 50;
   final List<ChatMessage> _messages = [];
   List<GroupMemberContactRecord> _groupMembers = const <GroupMemberContactRecord>[];
   String deviceIp = ''; // Loaded from SharedPreferences
@@ -111,6 +116,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       final savedIp = prefs.getString('device_ip')?.trim();
       final savedPort = prefs.getString('device_port')?.trim();
       final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
+      final storedPowerMode = prefs.getString(_powerModePrefKey);
       final myCallSign = (prefs.getString('callSign') ?? '').trim().toUpperCase();
       final myAddr = _normalizeAddress(
         (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
@@ -127,6 +133,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         _saveDatabaseLocallyEnabled = saveDbEnabled;
         _selfCallSign = myCallSign;
         _selfAddr = myAddr;
+        if (storedPowerMode != null && storedPowerMode.isNotEmpty) {
+          _powerMode = storedPowerMode;
+        }
+        _currentMessageLength =
+            _currentMessageLength.clamp(0, _maxMessageLength);
       });
       // Re-resolve targets now that self address / callsign are known.
       await _loadGroupMembers();
@@ -1018,11 +1029,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                                 ),
                                 maxLines: 4,
                                 minLines: 1,
-                                maxLength: 50,
+                                maxLength: _maxMessageLength,
                                 textCapitalization: TextCapitalization.sentences,
                                 onChanged: (value) {
                                   setState(() {
-                                    _currentMessageLength = value.length.clamp(0, 50);
+                                    _currentMessageLength =
+                                        value.length.clamp(0, _maxMessageLength);
                                   });
                                 },
                                 onSubmitted: (_) => _sendMessage(),
@@ -1053,7 +1065,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       Padding(
                         padding: const EdgeInsets.only(left: 4),
                         child: Text(
-                          '${_currentMessageLength} / 50',
+                          '$_currentMessageLength / $_maxMessageLength',
                           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                 fontSize: 11,
                                 color: Theme.of(context).colorScheme.onSurfaceVariant,

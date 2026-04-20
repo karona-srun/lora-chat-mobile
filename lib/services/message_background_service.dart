@@ -26,14 +26,24 @@ void messageBackgroundCallbackDispatcher() {
 class MessageBackgroundService {
   MessageBackgroundService._();
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
+  static const String _notificationSoundEnabledPrefKey =
+      'notification_sound_enabled';
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
-  static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
-    'lomhor_new_messages',
-    'New messages',
+  static const AndroidNotificationChannel _soundChannel = AndroidNotificationChannel(
+    'lomhor_new_messages_sound',
+    'New messages (sound)',
     description: 'Alerts when a new LoRa message is received.',
     importance: Importance.high,
+    playSound: true,
+  );
+  static const AndroidNotificationChannel _silentChannel = AndroidNotificationChannel(
+    'lomhor_new_messages_silent',
+    'New messages (silent)',
+    description: 'Alerts when a new LoRa message is received.',
+    importance: Importance.high,
+    playSound: false,
   );
 
   static Timer? _foregroundTimer;
@@ -451,18 +461,23 @@ class MessageBackgroundService {
     required String title,
     required String body,
   }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final soundEnabled = prefs.getBool(_notificationSoundEnabledPrefKey) ?? true;
+    final channel = soundEnabled ? _soundChannel : _silentChannel;
+
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
-        _channel.id,
-        _channel.name,
-        channelDescription: _channel.description,
+        channel.id,
+        channel.name,
+        channelDescription: channel.description,
         importance: Importance.high,
         priority: Priority.high,
+        playSound: soundEnabled,
       ),
-      iOS: const DarwinNotificationDetails(
+      iOS: DarwinNotificationDetails(
         presentAlert: true,
         presentBadge: true,
-        presentSound: true,
+        presentSound: soundEnabled,
       ),
     );
 
@@ -486,7 +501,8 @@ class MessageBackgroundService {
     final androidPlugin =
         _notifications.resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
-    await androidPlugin?.createNotificationChannel(_channel);
+    await androidPlugin?.createNotificationChannel(_soundChannel);
+    await androidPlugin?.createNotificationChannel(_silentChannel);
   }
 
   static Future<void> _requestNotificationPermissionIfNeeded() async {

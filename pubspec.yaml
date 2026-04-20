@@ -47,6 +47,7 @@ dependencies:
   sqflite_common_ffi: ^2.3.6
   khmer_fonts: ^0.0.6
   context_menu_android: ^1.0.6
+  dropdown_flutter: ^1.0.3
 
 dev_dependencies:
   flutter_test:

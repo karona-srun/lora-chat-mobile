@@ -27,10 +27,15 @@ class ChatDetailScreen extends StatefulWidget {
 
 class _ChatDetailScreenState extends State<ChatDetailScreen> {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
+  static const String _powerModePrefKey = 'power_mode';
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isConnected = false;
   bool _saveDatabaseLocallyEnabled = false;
+  String _powerMode = 'powerModeBalanced';
+
+  int get _maxMessageLength =>
+      _powerMode == 'powerModeBalanced' ? 100 : 50;
   final List<ChatMessage> _messages = [];
   String deviceIp = ''; // Loaded from SharedPreferences
   String devicePort = ''; // Loaded from SharedPreferences
@@ -80,6 +85,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       final savedIp = prefs.getString('device_ip')?.trim();
       final savedPort = prefs.getString('device_port')?.trim();
       final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
+      final storedPowerMode = prefs.getString(_powerModePrefKey);
 
       if (!mounted) return;
 
@@ -90,6 +96,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
         _isConnected = deviceIp.isNotEmpty;
         _saveDatabaseLocallyEnabled = saveDbEnabled;
+        if (storedPowerMode != null && storedPowerMode.isNotEmpty) {
+          _powerMode = storedPowerMode;
+        }
+        _currentMessageLength =
+            _currentMessageLength.clamp(0, _maxMessageLength);
       });
       await _initializeDirectChatPersistence();
     } catch (e) {
@@ -872,13 +883,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               ),
                               maxLines: 4,
                               minLines: 1,
-                              maxLength: 50,
+                              maxLength: _maxMessageLength,
                               textCapitalization:
                                   TextCapitalization.sentences,
                               onChanged: (value) {
                                 setState(() {
                                   _currentMessageLength =
-                                      value.length.clamp(0, 50);
+                                      value.length.clamp(0, _maxMessageLength);
                                 });
                               },
                               onSubmitted: (_) => _sendMessage(),
@@ -910,7 +921,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     Padding(
                       padding: const EdgeInsets.only(left: 4),
                       child: Text(
-                        '${_currentMessageLength} / 50',
+                        '$_currentMessageLength / $_maxMessageLength',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               fontSize: 11,
                               color: Theme.of(context)

@@ -133,8 +133,10 @@ class MessageBackgroundService {
 
       await _persistIncomingMessage(lastRx);
 
-      final incoming = _parseIncomingMessage(lastRx);
+      final incoming = await _parseIncomingMessage(lastRx);
       if (incoming == null) return;
+
+      // debugPrint('incoming: ${incoming.sender} ${incoming.text}');    
 
       if (!allowWhenForeground && _isAppInForeground) return;
 
@@ -142,6 +144,7 @@ class MessageBackgroundService {
         title: incoming.sender,
         body: incoming.text,
       );
+
     } catch (_) {
       // Keep background poll resilient; ignore transient network/parse errors.
     } finally {
@@ -197,7 +200,7 @@ class MessageBackgroundService {
 
     final ownerContactId = await ensureContact(ownerAddr);
 
-    final groupId = await LocalDatabaseService.instance.upsertGroup(
+    await LocalDatabaseService.instance.upsertGroup(
       GroupRecord(
         groupUuid: groupUuid,
         groupName: groupName,
@@ -228,7 +231,7 @@ class MessageBackgroundService {
 
       await LocalDatabaseService.instance.upsertGroupMember(
         GroupMemberRecord(
-          groupId: groupId,
+          groupUuid: groupUuid,
           contactId: contactId,
           role: role,
           isActive: true,
@@ -264,7 +267,7 @@ class MessageBackgroundService {
     );
   }
 
-  static _IncomingMessage? _parseIncomingMessage(String message) {
+  static Future<_IncomingMessage?> _parseIncomingMessage(String message) async {
     if (message.startsWith('HELLO|')) return null;
     if (message.startsWith('GROUP_INVITE|')) return null;
     if (message.startsWith('GROUP_REMOVE|')) return null;
@@ -295,8 +298,6 @@ class MessageBackgroundService {
       // return _IncomingMessage(sender: 'Via relay -> 0x$destHex', text: text);
       return _IncomingMessage(sender: 'New message', text: text);
     }
-
-    debugPrint('New message: $message');
 
     return _IncomingMessage(sender: 'New message', text: message);
   }
@@ -335,6 +336,17 @@ class MessageBackgroundService {
     return (senderName: null, text: _sanitizeIncomingText(trimmed));
   }
 
+  static ({String fromAddr, String toAddr, String text})?
+      _parsePipeDirectMessage(String raw) {
+    final parts = raw.split('|').map((e) => e.trim()).toList();
+    if (parts.length < 3) return null;
+    final fromAddr = _normalizeAddress(parts[0]);
+    final toAddr = _normalizeAddress(parts[1]);
+    final text = _sanitizeIncomingText(parts.sublist(2).join('|'));
+    if (fromAddr.isEmpty || toAddr.isEmpty || text.isEmpty) return null;
+    return (fromAddr: fromAddr, toAddr: toAddr, text: text);
+  }
+
   static Future<int> _ensureSelfContact() async {
     final prefs = await SharedPreferences.getInstance();
     final myCallSign = (prefs.getString('callSign') ?? '').trim();
@@ -352,8 +364,8 @@ class MessageBackgroundService {
   static Future<void> _persistIncomingMessage(String raw) async {
     final prefs = await SharedPreferences.getInstance();
     final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
+    // Respect setting: only persist incoming messages when local DB saving is enabled.
     if (!saveDbEnabled) return;
-
     if (_isIgnoredStatusNoise(raw)) return;
     if (raw.startsWith('GROUP_INVITE|') ||
         raw.startsWith('GROUP_REMOVE|') ||
@@ -363,6 +375,51 @@ class MessageBackgroundService {
 
     await LocalDatabaseService.instance.ensureInitialized();
     final selfContactId = await _ensureSelfContact();
+
+    final pipeDirect = _parsePipeDirectMessage(raw);
+    if (pipeDirect != null) {
+      final fromContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: pipeDirect.fromAddr,
+          displayName: 'Node 0x${pipeDirect.fromAddr}',
+        ),
+      );
+      final toContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: pipeDirect.toAddr,
+          displayName: pipeDirect.toAddr == _normalizeAddress(
+                  (await SharedPreferences.getInstance())
+                          .getString('myAddr') ??
+                      (await SharedPreferences.getInstance())
+                          .getString('my_addr') ??
+                      '')
+              ? 'You'
+              : 'Node 0x${pipeDirect.toAddr}',
+        ),
+      );
+      final isDuplicate =
+          await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+        chatType: ChatType.direct,
+        fromContactId: fromContactId,
+        toContactId: toContactId,
+        payload: pipeDirect.text,
+      );
+      if (!isDuplicate) {
+        await LocalDatabaseService.instance.insertMessage(
+          MessageRecord(
+            messageUuid: _newMessageUuid('dm'),
+            chatType: ChatType.direct,
+            fromContactId: fromContactId.toString(),
+            toContactId: toContactId.toString(),
+            payload: pipeDirect.text,
+            deliveryStatus: DeliveryStatus.delivered,
+            receivedAt: DateTime.now().toUtc().toIso8601String(),
+          ),
+        );
+      }
+      debugPrint('Message is saved to database');
+      return;
+    }
 
     final fromTagged = RegExp(
       r'^From 0x([0-9A-Fa-f]{2,4})\s*:\s*(.+)$',
@@ -380,12 +437,40 @@ class MessageBackgroundService {
         ),
       );
 
+
+
+      debugPrint('Persist Incoming Message : $raw');
+      final msg = raw.split('|');
+      final fromId = msg[1];
+      final toId = msg[2];
+      final text = msg[3];
+    // debugPrint('fromContactId: $fromContactId');
+    // debugPrint('toContactId: $toContactId');
+    // debugPrint('text: $text');
+
+    final messageUuid = await LocalDatabaseService.instance.insertMessage(
+      MessageRecord(
+        messageUuid: _newMessageUuid('dm'),
+        chatType: ChatType.direct,
+        fromContactId: fromId.toString(),
+        toContactId: toId.toString(),
+        payload: text.toString(),
+        deliveryStatus: DeliveryStatus.delivered,
+        receivedAt: DateTime.now().toUtc().toIso8601String(),
+      ),
+    );
+
+    if (messageUuid != null){
+      debugPrint('Message is saved to database');
+      debugPrint('messageUuid: $messageUuid');
+    }
+
       await LocalDatabaseService.instance.insertMessage(
         MessageRecord(
           messageUuid: _newMessageUuid('dm'),
           chatType: ChatType.direct,
-          fromContactId: fromContactId,
-          toContactId: selfContactId,
+          fromContactId: fromContactId.toString(),
+          toContactId: selfContactId.toString(),
           payload: parsed.text,
           deliveryStatus: DeliveryStatus.delivered,
           receivedAt: DateTime.now().toUtc().toIso8601String(),
@@ -408,8 +493,8 @@ class MessageBackgroundService {
           MessageRecord(
             messageUuid: _newMessageUuid('grp_$groupId'),
             chatType: ChatType.group,
-            fromContactId: fromContactId,
-            groupId: groupId,
+            fromContactId: fromContactId.toString(),
+            groupId: groupId.toString(),
             payload: parsed.text,
             deliveryStatus: DeliveryStatus.delivered,
             receivedAt: DateTime.now().toUtc().toIso8601String(),
@@ -439,8 +524,8 @@ class MessageBackgroundService {
         MessageRecord(
           messageUuid: _newMessageUuid('grp_$groupId'),
           chatType: ChatType.group,
-          fromContactId: senderContactId,
-          groupId: groupId,
+          fromContactId: senderContactId.toString(),
+          groupId: groupId.toString(),
           payload: plain.text,
           deliveryStatus: DeliveryStatus.delivered,
           receivedAt: DateTime.now().toUtc().toIso8601String(),
@@ -487,6 +572,8 @@ class MessageBackgroundService {
       body,
       details,
     );
+
+
   }
 
   static Future<void> _initializeNotifications() async {

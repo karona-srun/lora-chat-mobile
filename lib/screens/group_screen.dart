@@ -44,7 +44,7 @@ class GroupScreen extends StatelessWidget {
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const GroupsListScreen(),
+                    builder: (_) => const GroupsListScreen(),
                 ),
               );
             },

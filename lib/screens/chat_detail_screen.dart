@@ -16,16 +16,18 @@ class ChatDetailScreen extends StatefulWidget {
     super.key,
     required this.title,
     this.targetNodeId,
+    this.selfContactId,
   });
 
   final String title;
   final String? targetNodeId;
-
+  final String? selfContactId;
   @override
   State<ChatDetailScreen> createState() => _ChatDetailScreenState();
 }
 
-class _ChatDetailScreenState extends State<ChatDetailScreen> {
+class _ChatDetailScreenState extends State<ChatDetailScreen>
+    with WidgetsBindingObserver {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
   static const String _powerModePrefKey = 'power_mode';
   final TextEditingController _messageController = TextEditingController();
@@ -43,13 +45,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   int _currentMessageLength = 0;
   String _lastRxText = '';
   String? _targetHex;
-  int? _selfContactId;
-  int? _targetContactId;
+  String? _selfContactId;
+  String? _targetContactId;
   final Map<int, String> _messageUuidByIndex = <int, String>{};
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Add a welcome message
     _messages.add(ChatMessage(
       text:
@@ -58,7 +61,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       timestamp: DateTime.now(),
       isSystem: true,
     ));
-
     // Load saved connection settings from shared preferences
     _loadConnectionPrefs();
 
@@ -73,10 +75,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _messagePollTimer?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (!_saveDatabaseLocallyEnabled) return;
+    unawaited(_initializeDirectChatPersistence());
   }
 
   Future<void> _loadConnectionPrefs() async {
@@ -86,6 +96,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       final savedPort = prefs.getString('device_port')?.trim();
       final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
       final storedPowerMode = prefs.getString(_powerModePrefKey);
+      final lastReceivedText =
+          prefs.getString('message_last_received_text')?.trim() ?? '';
 
       if (!mounted) return;
 
@@ -99,6 +111,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         if (storedPowerMode != null && storedPowerMode.isNotEmpty) {
           _powerMode = storedPowerMode;
         }
+        _lastRxText = lastReceivedText;
         _currentMessageLength =
             _currentMessageLength.clamp(0, _maxMessageLength);
       });
@@ -119,6 +132,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   String _newMessageUuid() {
     return 'dm_${DateTime.now().microsecondsSinceEpoch}_${_messages.length}';
+  }
+
+  Future<int?> _resolveTargetContactIdFromDb({
+    required String normalizedTarget,
+  }) async {
+    final contacts = await LocalDatabaseService.instance.listContacts();
+    for (final contact in contacts) {
+      if (_normalizeAddress(contact.loraAddress) == normalizedTarget) {
+        return contact.id;
+      }
+    }
+    final titleUpper = widget.title.trim().toUpperCase();
+    if (titleUpper.isEmpty) return null;
+    for (final contact in contacts) {
+      if (contact.displayName.trim().toUpperCase() == titleUpper) {
+        return contact.id;
+      }
+    }
+    return null;
   }
 
   DateTime _parseMessageTime(MessageRecord record) {
@@ -155,16 +187,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   Future<void> _initializeDirectChatPersistence() async {
     if (!_saveDatabaseLocallyEnabled) return;
     final target = _targetHex ?? _resolveTargetHex();
-    if (target == null || target.isEmpty) return;
-    _targetHex = target;
     try {
       final prefs = await SharedPreferences.getInstance();
       final myCallSign = (prefs.getString('callSign') ?? '').trim();
       final myAddr = _normalizeAddress(
         (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
       );
-      final normalizedTarget = _normalizeAddress(target);
+      final normalizedTarget = _normalizeAddress(target ?? '');
       if (normalizedTarget.isEmpty) return;
+      _targetHex = normalizedTarget;
+
+      debugPrint('myAddr: $myAddr');
+      debugPrint('widget.selfContactId: ${widget.selfContactId}');
 
       final selfId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
@@ -172,17 +206,22 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           displayName: myCallSign.isNotEmpty ? myCallSign : 'You',
         ),
       );
-      final targetId = await LocalDatabaseService.instance.upsertContact(
-        ContactRecord(
-          loraAddress: normalizedTarget,
-          displayName: widget.title.trim().isNotEmpty
-              ? widget.title.trim()
-              : '0x$normalizedTarget',
-        ),
+      final existingTargetId = await _resolveTargetContactIdFromDb(
+        normalizedTarget: normalizedTarget,
       );
-
-      _selfContactId = selfId;
-      _targetContactId = targetId;
+      final targetId = existingTargetId ??
+          await LocalDatabaseService.instance.upsertContact(
+            ContactRecord(
+              loraAddress: normalizedTarget,
+              displayName: widget.title.trim().isNotEmpty
+                  ? widget.title.trim()
+                  : '0x$normalizedTarget',
+            ),
+          );
+      setState(() {
+        _selfContactId = selfId.toString();
+        _targetContactId = targetId.toString();
+      });
 
       await _loadDirectMessagesFromDb();
     } catch (e) {
@@ -194,18 +233,30 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final selfId = _selfContactId;
     final targetId = _targetContactId;
     if (selfId == null || targetId == null) return;
+    debugPrint('_loadDirectMessagesFromDb()');
     try {
       final records = await LocalDatabaseService.instance.listDirectMessages(
-        contactA: selfId,
-        contactB: targetId,
+        contactA: selfId.toString(),
+        contactB: targetId.toString(),
       );
+
+      debugPrint('selfId: $selfId');
+      debugPrint('targetId: $targetId');
+      debugPrint('records: ${records.length}');
+
+      debugPrint('records: ${records.map((record) => record.toMap()).toList()}');
+
       if (!mounted) return;
       setState(() {
+        _messageUuidByIndex.clear();
         _messages
           ..clear()
           ..addAll(
-            records.map((record) {
-              final isOutgoing = record.fromContactId == selfId;
+            records.asMap().entries.map((entry) {
+              final i = entry.key;
+              final record = entry.value;
+              _messageUuidByIndex[i] = record.messageUuid;
+              final isOutgoing = record.fromContactId == selfId.toString() && record.toContactId == targetId.toString();
               return ChatMessage(
                 text: record.payload,
                 sender: isOutgoing ? 'You' : widget.title,
@@ -234,8 +285,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   Future<void> _persistDirectMessage({
     required String messageUuid,
-    required int fromContactId,
-    required int toContactId,
+    required String fromContactId,
+    required String toContactId,
     required String payload,
     required MessageDeliveryStatus status,
     bool isIncoming = false,
@@ -246,8 +297,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       MessageRecord(
         messageUuid: messageUuid,
         chatType: ChatType.direct,
-        fromContactId: fromContactId,
-        toContactId: toContactId,
+        fromContactId: fromContactId.toString(),
+        toContactId: toContactId.toString(),
         payload: payload,
         deliveryStatus: _toDbDeliveryStatus(status),
         sentAt: isIncoming ? null : now,
@@ -373,21 +424,35 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     if (!mounted) return;
     final selfId = _selfContactId;
     final targetId = _targetContactId;
+    final fromId = int.tryParse(targetId ?? '');
+    final toId = int.tryParse(selfId ?? '');
+    if (fromId != null && toId != null) {
+      final isDup =
+          await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+        chatType: ChatType.direct,
+        fromContactId: fromId,
+        toContactId: toId,
+        payload: text,
+      );
+      if (isDup) return;
+    }
     if (selfId != null && targetId != null) {
+      final msg = text.toString().replaceAll("%20", " ");
       await _persistDirectMessage(
         messageUuid: _newMessageUuid(),
-        fromContactId: targetId,
-        toContactId: selfId,
-        payload: text,
+        fromContactId: targetId.toString(),
+        toContactId: selfId.toString(),
+        payload: msg,
         status: MessageDeliveryStatus.none,
         isIncoming: true,
       );
     }
     if (!mounted) return;
     setState(() {
+      final msg = text.toString().replaceAll("%20", " ");
       _messages.add(
         ChatMessage(
-          text: text,
+          text: msg,
           sender: sender,
           timestamp: DateTime.now(),
           isSystem: false,
@@ -545,14 +610,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     });
     final selfId = _selfContactId;
     final targetId = _targetContactId;
+
+    debugPrint('selfId: $selfId');
     if (selfId != null && targetId != null) {
       final uuid = _newMessageUuid();
       _messageUuidByIndex[outgoingIndex] = uuid;
       try {
         await _persistDirectMessage(
           messageUuid: uuid,
-          fromContactId: selfId,
-          toContactId: targetId,
+          fromContactId: selfId.toString(),
+          toContactId: targetId.toString(),
           payload: messageText,
           status: MessageDeliveryStatus.sending,
         );
@@ -602,6 +669,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   void _updateOutgoingDeliveryStatus(int index, MessageDeliveryStatus status) {
     if (!mounted || index < 0 || index >= _messages.length) return;
+    final current = _messages[index].deliveryStatus;
+    // Prevent late async callbacks from downgrading a confirmed ACK.
+    if (current == MessageDeliveryStatus.acked &&
+        status != MessageDeliveryStatus.acked) {
+      return;
+    }
     setState(() {
       _messages[index] = _messages[index].copyWith(deliveryStatus: status);
     });
@@ -711,8 +784,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     try {
       if (selfId != null && targetId != null) {
         await LocalDatabaseService.instance.deleteDirectMessagesBetween(
-          contactA: selfId,
-          contactB: targetId,
+          contactA: selfId.toString(),
+          contactB: targetId.toString(),
         );
       }
       if (!mounted) return;

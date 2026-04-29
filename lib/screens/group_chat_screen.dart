@@ -16,10 +16,12 @@ class GroupChatScreen extends StatefulWidget {
   const GroupChatScreen({
     super.key,
     required this.groupId,
+    required this.groupUuid,
     required this.groupTitle,
   });
 
   final int groupId;
+  final String groupUuid;
   final String groupTitle;
 
   @override
@@ -68,6 +70,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       const Duration(milliseconds: 800),
       (_) => _fetchMessages(),
     );
+    _loadGroupMessagesFromDb();
     _fetchMessages();
   }
 
@@ -169,7 +172,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   String _newMessageUuid() {
-    return 'grp_${widget.groupId}_${DateTime.now().microsecondsSinceEpoch}_${_messages.length}';
+    return '${widget.groupUuid}_${DateTime.now().microsecondsSinceEpoch}_${_messages.length}';
   }
 
   DateTime _parseMessageTime(MessageRecord record) {
@@ -222,7 +225,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
-  String _senderLabelForContactId(int contactId) {
+  String _senderLabelForContactId(String contactId) {
     if (_selfContactId != null && contactId == _selfContactId) return 'You';
     for (final member in _groupMembers) {
       if (member.contactId == contactId) {
@@ -237,8 +240,25 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (!_saveDatabaseLocallyEnabled) return;
     try {
       final records = await LocalDatabaseService.instance.listGroupMessages(
-        groupId: widget.groupId,
+        groupUuid: widget.groupUuid,
       );
+
+      debugPrint(
+        '[GroupChat] Open groupUuid=${widget.groupUuid} '
+        '(groupId=${widget.groupId}) -> loaded ${records.length} message(s)',
+      );
+      for (final record in records) {
+        final payload = record.payload.replaceAll('\n', r'\n');
+        final shortPayload = payload.length > 120
+            ? '${payload.substring(0, 120)}...'
+            : payload;
+        debugPrint(
+          '[GroupChat] [${widget.groupUuid}] '
+          'from=${record.fromContactId} uuid=${record.messageUuid} '
+          'text="$shortPayload"',
+        );
+      }
+
       if (!mounted) return;
       setState(() {
         _messageUuidByIndex.clear();
@@ -251,7 +271,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               _messageUuidByIndex[i] = record.messageUuid;
               return ChatMessage(
                 text: record.payload,
-                sender: _senderLabelForContactId(record.fromContactId),
+                sender: _senderLabelForContactId(record.fromContactId.toString()),
                 timestamp: _parseMessageTime(record),
                 isSystem: false,
                 deliveryStatus: _toUiDeliveryStatus(record.deliveryStatus),
@@ -288,8 +308,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       MessageRecord(
         messageUuid: messageUuid,
         chatType: ChatType.group,
-        fromContactId: fromContactId,
-        groupId: widget.groupId,
+        fromContactId: fromContactId.toString(),
+        groupId: widget.groupId.toString(),
         payload: payload,
         deliveryStatus: _toDbDeliveryStatus(status),
         sentAt: isIncoming ? null : now,
@@ -318,11 +338,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final uniqueTargets = <String>{};
     for (final member in members) {
       final normalizedAddress = _normalizeAddress(member.loraAddress);
-      final normalizedName = member.displayName.trim().toUpperCase();
       if (normalizedAddress.isEmpty) continue;
-      if (normalizedAddress == '__SELF__' || normalizedName == '__SELF__') continue;
+      if (normalizedAddress == '__SELF__') continue;
       if (_selfAddr.isNotEmpty && normalizedAddress == _selfAddr) continue;
-      if (_selfCallSign.isNotEmpty && normalizedName == _selfCallSign) continue;
       uniqueTargets.add(normalizedAddress);
     }
     return uniqueTargets.toList()..sort();
@@ -372,8 +390,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     var text = raw.trim();
     // Some firmwares prefix payloads with frame counters like `1|...`.
     text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
-    // Drop trailing non-ASCII homoglyph noise (e.g. repeated Greek letters).
-    text = text.replaceFirst(RegExp(r'[^\x20-\x7E]+$'), '').trimRight();
+    // Keep emoji/non-ASCII content, only strip control characters.
+    text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
     return text;
   }
 
@@ -402,6 +420,18 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return (senderName: null, text: _sanitizeIncomingText(trimmed));
   }
 
+  ({int? groupId, String payload}) _extractGroupWirePayload(String payload) {
+    final trimmed = payload.trim();
+    final match = RegExp(r'^GROUP_MSG\|(\d+)\|(.+)$').firstMatch(trimmed);
+    if (match == null) return (groupId: null, payload: payload);
+    final parsedGroupId = int.tryParse(match.group(1) ?? '');
+    final wrappedPayload = (match.group(2) ?? '').trim();
+    if (parsedGroupId == null || wrappedPayload.isEmpty) {
+      return (groupId: null, payload: payload);
+    }
+    return (groupId: parsedGroupId, payload: wrappedPayload);
+  }
+
   Future<void> _fetchMessages() async {
     if (!_isConnected || deviceIp.trim().isEmpty) return;
     try {
@@ -428,9 +458,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
       final traffic = _trafficFromStatus(decodedRaw);
       final lastRx = traffic['lastReceived']?.toString().trim() ?? '';
-      debugPrint('---------------------------------------');
-      debugPrint('lastRx: $lastRx');
-      debugPrint('---------------------------------------');
+      
       if (lastRx.isEmpty) return;
       final currentReceivedCount = int.tryParse(
         (traffic['received'] ?? '').toString(),
@@ -466,7 +494,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       ).firstMatch(lastRx);
       if (tagged != null) {
         final fromHex = _normalizeAddress(tagged.group(1) ?? '');
-        final parsed = _splitSenderFromPayload(tagged.group(2) ?? '');
+        final extracted = _extractGroupWirePayload(tagged.group(2) ?? '');
+        if (extracted.groupId != null && extracted.groupId != widget.groupId) {
+          return;
+        }
+        final parsed = _splitSenderFromPayload(extracted.payload);
         if (parsed.text.isEmpty) return;
         if (fromHex == _selfAddr) return;
         if (!_isGroupMemberAddress(fromHex)) return;
@@ -482,12 +514,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             isIncoming: true,
           );
         }
-
-        debugPrint('---------------------------------------');
-        debugPrint('parsed.text: ${parsed.text}');
-        debugPrint('parsed.senderName: ${parsed.senderName}');
-        debugPrint('fromHex: $fromHex');
-        debugPrint('---------------------------------------');
 
         setState(() {
           _messages.add(
@@ -509,7 +535,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       ).firstMatch(lastRx);
       if (relay != null) {
         final destHex = (relay.group(1) ?? '').toUpperCase();
-        final parsed = _splitSenderFromPayload(relay.group(2) ?? '');
+        final extracted = _extractGroupWirePayload(relay.group(2) ?? '');
+        if (extracted.groupId != null && extracted.groupId != widget.groupId) {
+          return;
+        }
+        final parsed = _splitSenderFromPayload(extracted.payload);
         if (parsed.text.isEmpty) return;
         if (_targetHexes.isNotEmpty && !_targetHexes.contains(destHex)) return;
         if (!mounted) return;
@@ -534,11 +564,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           isIncoming: true,
         );
 
-        debugPrint('---------------------------------------');
-        debugPrint('parsed.text --- 1: ${parsed.text}');
-        debugPrint('parsed.senderName: ${parsed.senderName}');
-        debugPrint('destHex: $destHex');
-        debugPrint('---------------------------------------');
         setState(() {
           _messages.add(
             ChatMessage(
@@ -555,7 +580,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
       // Some firmwares store plain payloads in lastReceived.
       // Accept only explicit "sender: message" payloads to avoid showing noise.
-      final plain = _splitSenderFromPayload(lastRx);
+      final extracted = _extractGroupWirePayload(lastRx);
+      if (extracted.groupId != null && extracted.groupId != widget.groupId) {
+        return;
+      }
+      final plain = _splitSenderFromPayload(extracted.payload);
       final sender = plain.senderName?.trim() ?? '';
       if (plain.text.isEmpty || sender.isEmpty) return;
       if (_selfCallSign.isNotEmpty &&
@@ -577,11 +606,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         status: MessageDeliveryStatus.none,
         isIncoming: true,
       );
-
-      debugPrint('---------------------------------------');
-      debugPrint('plain.text: ${plain.text}');
-      debugPrint('sender: $sender');
-      debugPrint('---------------------------------------');
 
       setState(() {
         _messages.add(
@@ -631,9 +655,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     required String plainText,
     required int outgoingIndex,
     required List<String> sendTargets,
+    required String groupUuid,
   }) async {
     final senderName = _selfCallSign.isNotEmpty ? _selfCallSign : 'Unknown';
-    final payloadWithName = '$senderName: $plainText';
+    final payloadWithName = 'GROUP_MSG|$groupUuid|$senderName: $plainText';
     try {
       var ackedCount = 0;
       var noAckCount = 0;
@@ -641,7 +666,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
       for (final target in sendTargets) {
         try {
-          final query = <String, String>{'msg': payloadWithName, 'to': target};
+          final query = <String, String>{
+            'msg': payloadWithName,
+            'to': target,
+            'groupUuid': groupUuid,
+          };
           final uri = _buildUri('/send', query);
           final response = await http.get(uri).timeout(
             const Duration(seconds: 5),
@@ -687,7 +716,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Future<void> _sendMessage() async {
     final messageText = _messageController.text.trim();
     if (messageText.isEmpty) return;
-    final int sendGroupId = widget.groupId;
+    final String sendGroupUuid = widget.groupUuid;
 
     if (!_isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -699,9 +728,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return;
     }
 
-    final details = await LocalDatabaseService.instance.getGroupDetails(sendGroupId);
-    if (!mounted || widget.groupId != sendGroupId) return;
-    if (details == null || details.groupId != sendGroupId) {
+    final details = await LocalDatabaseService.instance.getGroupDetails(widget.groupId);
+    if (!mounted || widget.groupUuid != sendGroupUuid) return;
+    if (details == null || details.groupUuid != sendGroupUuid) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Could not load this group. Try opening it again.'),
@@ -761,11 +790,19 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       plainText: messageText,
       outgoingIndex: outgoingIndex,
       sendTargets: sendTargets,
+      groupUuid: sendGroupUuid,
     );
+    _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.acked);
   }
 
   void _updateOutgoingDeliveryStatus(int index, MessageDeliveryStatus status) {
     if (!mounted || index < 0 || index >= _messages.length) return;
+    final current = _messages[index].deliveryStatus;
+    // Prevent late async callbacks from downgrading a confirmed ACK.
+    if (current == MessageDeliveryStatus.acked &&
+        status != MessageDeliveryStatus.acked) {
+      return;
+    }
     setState(() {
       _messages[index] = _messages[index].copyWith(deliveryStatus: status);
     });
@@ -801,10 +838,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return;
     }
 
-    final int sendGroupId = widget.groupId;
-    final details = await LocalDatabaseService.instance.getGroupDetails(sendGroupId);
-    if (!mounted || widget.groupId != sendGroupId) return;
-    if (details == null || details.groupId != sendGroupId) {
+    final String sendGroupUuid = widget.groupUuid;
+    final details = await LocalDatabaseService.instance.getGroupDetails(widget.groupId);
+    if (!mounted || widget.groupUuid != sendGroupUuid) return;
+    if (details == null || details.groupUuid != sendGroupUuid) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -838,6 +875,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       plainText: messageText,
       outgoingIndex: index,
       sendTargets: sendTargets,
+      groupUuid: widget.groupUuid,
     );
   }
 
@@ -868,7 +906,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final int groupId = widget.groupId;
     try {
       await LocalDatabaseService.instance.deleteGroupMessagesForGroup(
-        groupId: groupId,
+        groupId: groupId.toString(),
       );
       if (!mounted) return;
       setState(() {

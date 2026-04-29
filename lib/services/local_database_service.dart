@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart' as sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as sqflite_ffi;
@@ -97,7 +98,7 @@ class GroupRecord {
 class GroupMemberRecord {
   GroupMemberRecord({
     this.id,
-    required this.groupId,
+    required this.groupUuid,
     required this.contactId,
     this.role = GroupMemberRole.member,
     this.joinedAt,
@@ -105,7 +106,7 @@ class GroupMemberRecord {
   });
 
   final int? id;
-  final int groupId;
+  final String groupUuid;
   final int contactId;
   final GroupMemberRole role;
   final String? joinedAt;
@@ -114,7 +115,7 @@ class GroupMemberRecord {
   Map<String, Object?> toMap() {
     return {
       'id': id,
-      'group_id': groupId,
+      'group_uuid': groupUuid,
       'contact_id': contactId,
       'role': role.name,
       'joined_at': joinedAt,
@@ -125,7 +126,7 @@ class GroupMemberRecord {
   factory GroupMemberRecord.fromMap(Map<String, Object?> map) {
     return GroupMemberRecord(
       id: map['id'] as int?,
-      groupId: map['group_id'] as int,
+      groupUuid: map['group_uuid'] as String,
       contactId: map['contact_id'] as int,
       role: GroupMemberRole.values.firstWhere(
         (value) => value.name == (map['role'] as String? ?? 'member'),
@@ -206,9 +207,9 @@ class MessageRecord {
   final int? id;
   final String messageUuid;
   final ChatType chatType;
-  final int fromContactId;
-  final int? toContactId;
-  final int? groupId;
+  final String fromContactId;
+  final String? toContactId;
+  final String? groupId;
   final String payload;
   final String payloadType;
   final DeliveryStatus deliveryStatus;
@@ -241,9 +242,9 @@ class MessageRecord {
         (value) => value.name == (map['chat_type'] as String? ?? 'direct'),
         orElse: () => ChatType.direct,
       ),
-      fromContactId: map['from_contact_id'] as int,
-      toContactId: map['to_contact_id'] as int?,
-      groupId: map['group_id'] as int?,
+      fromContactId: (map['from_contact_id'])?.toString() ?? '',
+      toContactId: (map['to_contact_id'])?.toString(),
+      groupId: (map['group_id'])?.toString(),
       payload: map['payload'] as String,
       payloadType: map['payload_type'] as String? ?? 'text',
       deliveryStatus: DeliveryStatus.values.firstWhere(
@@ -318,7 +319,7 @@ CREATE TABLE groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   group_uuid TEXT NOT NULL UNIQUE,
   group_name TEXT NOT NULL,
-  owner_contact_id INTEGER NOT NULL,
+  owner_contact_id TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (owner_contact_id) REFERENCES contacts(id)
@@ -328,8 +329,8 @@ CREATE TABLE groups (
     await db.execute('''
 CREATE TABLE group_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  group_id INTEGER NOT NULL,
-  contact_id INTEGER NOT NULL,
+  group_id TEXT NOT NULL,
+  contact_id TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member',
   joined_at TEXT NOT NULL DEFAULT (datetime('now')),
   is_active INTEGER NOT NULL DEFAULT 1,
@@ -344,8 +345,8 @@ CREATE TABLE messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_uuid TEXT NOT NULL UNIQUE,
   chat_type TEXT NOT NULL,
-  from_contact_id INTEGER NOT NULL,
-  to_contact_id INTEGER,
+  from_contact_id TEXT NOT NULL,
+  to_contact_id TEXT,
   group_id INTEGER,
   payload TEXT NOT NULL,
   payload_type TEXT NOT NULL DEFAULT 'text',
@@ -447,17 +448,33 @@ CREATE TABLE messages (
 
   Future<int> upsertGroupMember(GroupMemberRecord member) async {
     final db = await database;
+    final normalizedGroupUuid = member.groupUuid.trim();
+    if (normalizedGroupUuid.isEmpty) {
+      throw ArgumentError('groupUuid is required');
+    }
+    final groups = await db.query(
+      'groups',
+      columns: ['id'],
+      where: 'group_uuid = ?',
+      whereArgs: [normalizedGroupUuid],
+      limit: 1,
+    );
+    if (groups.isEmpty) {
+      throw StateError('Group not found for uuid: $normalizedGroupUuid');
+    }
+    final groupId = groups.first['id'] as int;
+
     final existing = await db.query(
       'group_members',
       columns: ['id'],
-      where: 'group_id = ? AND contact_id = ?',
-      whereArgs: [member.groupId, member.contactId],
+      where: 'group_uuid = ? AND contact_id = ?',
+      whereArgs: [groupId, member.contactId],
       limit: 1,
     );
 
     if (existing.isEmpty) {
       return db.insert('group_members', {
-        'group_id': member.groupId,
+        'group_uuid': normalizedGroupUuid,
         'contact_id': member.contactId,
         'role': member.role.name,
         'is_active': member.isActive ? 1 : 0,
@@ -487,10 +504,10 @@ CREATE TABLE messages (
     required String groupName,
     required String groupUuid,
     required int ownerContactId,
-    required List<int> memberContactIds,
+    required List<String> memberContactIds,
   }) async {
     final db = await database;
-    final uniqueMembers = <int>{...memberContactIds, ownerContactId}.toList();
+    final uniqueMembers = <String>{...memberContactIds, ownerContactId.toString()}.toList();
 
     return db.transaction((txn) async {
       final groupId = await txn.insert('groups', {
@@ -630,13 +647,23 @@ ORDER BY
     );
   }
 
-  Future<int?> insertMessage(MessageRecord message) async {
+  Future<String?> insertMessage(MessageRecord message) async {
     final db = await database;
+    final resolvedFromContactId = await _resolveMessageContactId(
+      rawValue: message.fromContactId,
+      fallbackDisplayName: 'Node 0x${_normalizeAddressForContactLookup(message.fromContactId)}',
+    );
+    if (resolvedFromContactId == null) return null;
+    final resolvedToContactId = await _resolveMessageContactId(
+      rawValue: message.toContactId,
+      fallbackDisplayName: 'Node 0x${_normalizeAddressForContactLookup(message.toContactId ?? '')}',
+    );
+
     final insertedId = await db.insert('messages', {
       'message_uuid': message.messageUuid,
       'chat_type': message.chatType.name,
-      'from_contact_id': message.fromContactId,
-      'to_contact_id': message.toContactId,
+      'from_contact_id': resolvedFromContactId,
+      'to_contact_id': resolvedToContactId,
       'group_id': message.groupId,
       'payload': message.payload,
       'payload_type': message.payloadType,
@@ -645,7 +672,62 @@ ORDER BY
       'received_at': message.receivedAt,
     }, conflictAlgorithm: sqflite.ConflictAlgorithm.ignore);
     if (insertedId == 0) return null;
-    return insertedId;
+    return insertedId.toString();
+  }
+
+  String _normalizeAddressForContactLookup(String value) {
+    var text = value.trim().toUpperCase();
+    if (text.startsWith('0X')) text = text.substring(2);
+    text = text.replaceAll(RegExp(r'[\s:-]'), '');
+    if (text.isEmpty) return '';
+    if (!RegExp(r'^[0-9A-F]+$').hasMatch(text)) return '';
+    return text.length <= 4 ? text.padLeft(4, '0') : text;
+  }
+
+  Future<String?> _resolveMessageContactId({
+    required String? rawValue,
+    required String fallbackDisplayName,
+  }) async {
+    if (rawValue == null) return null;
+    final normalized = rawValue.trim();
+    if (normalized.isEmpty) return null;
+    final db = await database;
+
+    final parsedId = int.tryParse(normalized);
+    if (parsedId != null) {
+      final existingById = await db.query(
+        'contacts',
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [parsedId],
+        limit: 1,
+      );
+      if (existingById.isNotEmpty) return parsedId.toString();
+    }
+
+    final normalizedAddr = _normalizeAddressForContactLookup(normalized);
+    if (normalizedAddr.isEmpty) return null;
+    final existingByAddr = await db.query(
+      'contacts',
+      columns: ['id'],
+      where: 'lora_address = ?',
+      whereArgs: [normalizedAddr],
+      limit: 1,
+    );
+    if (existingByAddr.isNotEmpty) {
+      final id = existingByAddr.first['id'] as int;
+      return id.toString();
+    }
+
+    final createdId = await upsertContact(
+      ContactRecord(
+        loraAddress: normalizedAddr,
+        displayName: fallbackDisplayName.trim().isEmpty
+            ? 'Node 0x$normalizedAddr'
+            : fallbackDisplayName.trim(),
+      ),
+    );
+    return createdId.toString();
   }
 
   Future<bool> hasRecentDuplicateIncomingMessage({
@@ -707,8 +789,8 @@ LIMIT 1;
   }
 
   Future<List<MessageRecord>> listDirectMessages({
-    required int contactA,
-    required int contactB,
+    required String contactA,
+    required String contactB,
     int? limit,
   }) async {
     final db = await database;
@@ -720,13 +802,14 @@ LIMIT 1;
       orderBy: 'created_at ASC',
       limit: limit,
     );
+    debugPrint('rows: ${rows.length}');
     return rows.map(MessageRecord.fromMap).toList();
   }
 
   /// Deletes all persisted direct messages between two contacts (both directions).
   Future<int> deleteDirectMessagesBetween({
-    required int contactA,
-    required int contactB,
+    required String contactA,
+    required String contactB,
   }) async {
     final db = await database;
     return db.delete(
@@ -738,7 +821,7 @@ LIMIT 1;
   }
 
   /// Deletes all persisted group chat messages for [groupId].
-  Future<int> deleteGroupMessagesForGroup({required int groupId}) async {
+  Future<int> deleteGroupMessagesForGroup({required String groupId}) async {
     final db = await database;
     return db.delete(
       'messages',
@@ -748,16 +831,20 @@ LIMIT 1;
   }
 
   Future<List<MessageRecord>> listGroupMessages({
-    required int groupId,
+    required String groupUuid,
     int? limit,
   }) async {
     final db = await database;
-    final rows = await db.query(
-      'messages',
-      where: "chat_type = 'group' AND group_id = ?",
-      whereArgs: [groupId],
-      orderBy: 'created_at ASC',
-      limit: limit,
+    final rows = await db.rawQuery(
+      '''
+SELECT m.*
+FROM messages m
+INNER JOIN groups g ON g.id = m.group_id
+WHERE m.chat_type = 'group' AND g.group_uuid = ?
+ORDER BY m.created_at ASC
+${limit != null ? 'LIMIT ?' : ''};
+''',
+      limit != null ? [groupUuid, limit] : [groupUuid],
     );
     return rows.map(MessageRecord.fromMap).toList();
   }
@@ -800,6 +887,18 @@ WHERE gm.is_active = 1
         .whereType<int>()
         .toSet()
         .toList();
+  }
+
+  // get all messages by contact id
+  Future<List<MessageRecord>> listMessagesByFromContactId(String contactId, String? toContactId) async {
+    final db = await database;
+    final rows = await db.query(
+      'messages',
+      where: 'from_contact_id = ? AND to_contact_id = ?',
+      whereArgs: [contactId, toContactId],
+    );
+    debugPrint('rows: ${rows.length}');
+    return rows.map(MessageRecord.fromMap).toList();
   }
 
   Future<void> close() async {

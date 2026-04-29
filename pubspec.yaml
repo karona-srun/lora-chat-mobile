@@ -75,6 +75,7 @@ flutter:
   assets:
     - assets/icons/send.png
     - assets/images/logo.png
+    - assets/icons/group.png
   #   - images/a_dot_burr.jpeg
   #   - images/a_dot_ham.jpeg
 

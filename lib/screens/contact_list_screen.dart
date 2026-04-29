@@ -43,6 +43,7 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
   final Set<String> _removedAddrs = <String>{};
+  String? _selfContactId = "";
 
   Future<List<_NodeEntry>> _loadCachedContacts() async {
     try {
@@ -97,6 +98,14 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
     }
   }
 
+  Future<void> _initializeSelfContactId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final myAddr = prefs.getString('myAddr')?.trim() ?? '';
+    setState(() {
+      _selfContactId = myAddr;
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -104,7 +113,10 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
     _searchController.addListener(() {
       setState(() => _searchQuery = _searchController.text.trim());
     });
+    _initializeSelfContactId();
   }
+
+
 
   @override
   void dispose() {
@@ -411,7 +423,7 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) =>
-                  ChatDetailScreen(title: node.name, targetNodeId: node.addr),
+                  ChatDetailScreen(title: node.name, targetNodeId: node.addr, selfContactId: _selfContactId),
             ),
           );
         },

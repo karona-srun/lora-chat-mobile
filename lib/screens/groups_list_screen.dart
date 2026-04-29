@@ -14,11 +14,15 @@ class GroupsListScreen extends StatefulWidget {
 
 class _GroupsListScreenState extends State<GroupsListScreen> {
   late Future<List<GroupSummaryRecord>> _groupsFuture;
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+  bool _hasScrolled = false;
 
   @override
   void initState() {
     super.initState();
     _groupsFuture = LocalDatabaseService.instance.listGroups();
+    _reloadGroups();
   }
 
   Future<void> _reloadGroups() async {
@@ -40,7 +44,9 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => GroupChatScreen(
+          key: ValueKey<int>(result.groupId),
           groupId: result.groupId,
+          groupUuid: result.groupUuid.toString(),
           groupTitle: result.groupName,
         ),
       ),
@@ -59,6 +65,12 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
     if (removed == true) {
       await _reloadGroups();
     }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   @override
@@ -81,6 +93,38 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
             icon: const Icon(Icons.add),
           ),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(64),
+          child: Container(
+            color: _hasScrolled
+                ? Colors.transparent
+                : Colors.transparent,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Search groups',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchQuery.isEmpty
+                    ? null
+                    : IconButton(
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() => _searchQuery = '');
+                        },
+                        icon: const Icon(Icons.clear),
+                      ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                isDense: true,
+              ),
+              onChanged: (value) {
+                setState(() => _searchQuery = value);
+              },
+            ),
+          ),
+        ),
       ),
       body: FutureBuilder<List<GroupSummaryRecord>>(
         future: _groupsFuture,
@@ -89,12 +133,20 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
             return const Center(child: CircularProgressIndicator());
           }
           final groups = snapshot.data ?? const <GroupSummaryRecord>[];
+          final normalizedQuery = _searchQuery.trim().toLowerCase();
+          final filteredGroups = normalizedQuery.isEmpty
+              ? groups
+              : groups.where((group) {
+                  final name = group.groupName.trim().toLowerCase();
+                  return name.contains(normalizedQuery);
+                }).toList();
+
           if (groups.isEmpty) {
             return Center(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 28),
                 child: Text(
-                  'No groups yet. Tap + to create a group.',
+                  AppLocalizations.of(context).tr('noGroups'),
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
@@ -104,55 +156,97 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
 
           return RefreshIndicator(
             onRefresh: _reloadGroups,
-            child: ListView.separated(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              itemCount: groups.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final group = groups[index];
-                final name = group.groupName.trim().isEmpty
-                    ? 'Unnamed group'
-                    : group.groupName.trim();
-                return ListTile(
-                  dense: true,
-                  visualDensity: VisualDensity.compact,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                  leading: CircleAvatar(
-                    radius: 16,
-                    child: Text(
-                      name[0].toUpperCase(),
-                      style: const TextStyle(fontSize: 14),
-                    ),
-                  ),
-                  title: Text(
-                    name,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  subtitle: Text(
-                    '${group.memberCount} members',
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.info_outline, size: 20),
-                    onPressed: () => _openGroupDetails(group),
-                  ),
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => GroupChatScreen(
-                          groupId: group.groupId,
-                          groupTitle: name,
-                        ),
-                      ),
-                    );
-                  },
-                );
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                final scrolled = notification.metrics.pixels > 0;
+                if (scrolled != _hasScrolled) {
+                  setState(() => _hasScrolled = scrolled);
+                }
+                return false;
               },
+              child: filteredGroups.isEmpty
+                  ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 28,
+                                vertical: 32,
+                              ),
+                              child: Text(
+                                'No groups match your search',
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.bodyMedium,
+                              ),
+                            ),
+                          ],
+                        )
+                  : ListView.separated(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      itemCount: filteredGroups.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final group = filteredGroups[index];
+                        final name = group.groupName.trim().isEmpty
+                            ? 'Unnamed group'
+                            : group.groupName.trim();
+                        return ListTile(
+                          dense: true,
+                          visualDensity: VisualDensity.compact,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                          leading: Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .primary
+                                  .withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Icon(
+                              Icons.group,
+                              color: Theme.of(context).colorScheme.primary,
+                              size: 28,
+                            ),
+                          ),
+                          title: Text(
+                            name,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          subtitle: Text(
+                            '${group.memberCount} members',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.info_outline, size: 20),
+                            onPressed: () => _openGroupDetails(group),
+                          ),
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => GroupChatScreen(
+                                  key: ValueKey<int>(group.groupId),
+                                  groupId: group.groupId,
+                                  groupUuid: group.groupUuid,
+                                  groupTitle: name,
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
             ),
           );
         },

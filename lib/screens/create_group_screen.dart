@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
 
 import '../services/local_database_service.dart';
 import '../l10n/app_localizations.dart';
@@ -7,10 +8,12 @@ import '../l10n/app_localizations.dart';
 class CreatedGroupPayload {
   const CreatedGroupPayload({
     required this.groupId,
+    required this.groupUuid,
     required this.groupName,
   });
 
   final int groupId;
+  final String groupUuid;
   final String groupName;
 }
 
@@ -23,7 +26,7 @@ class CreateGroupScreen extends StatefulWidget {
 
 class _CreateGroupScreenState extends State<CreateGroupScreen> {
   final TextEditingController _nameController = TextEditingController();
-  final Set<int> _selectedContactIds = <int>{};
+  final Set<String> _selectedContactIds = <String>{};
   List<ContactRecord> _contacts = const <ContactRecord>[];
   bool _isLoading = true;
   bool _isSubmitting = false;
@@ -46,21 +49,36 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   String _normalizeAddress(String value) {
     var text = value.trim().toUpperCase();
     if (text.startsWith('0X')) text = text.substring(2);
-    return text.replaceAll(RegExp(r'[\s:-]'), '');
+    text = text.replaceAll(RegExp(r'[\s:-]'), '');
+    if (text.isEmpty) return '';
+    if (!RegExp(r'^[0-9A-F]+$').hasMatch(text)) return '';
+    return text.length <= 4 ? text.padLeft(4, '0') : text;
   }
 
   bool _isHiddenMember(ContactRecord contact) {
     final normalizedAddress = _normalizeAddress(contact.loraAddress);
-    final normalizedName = contact.displayName.trim().toUpperCase();
-    return normalizedAddress == '__SELF__' || normalizedName == '__SELF__';
+    final normalizedName = _normalizeAddress(contact.displayName);
+    
+    final isSystemSender =
+        normalizedAddress.startsWith('__GROUP_SENDER') ||
+        normalizedName.startsWith('__GROUP_SENDER');
+    
+    final isIncomingUnknown =
+        normalizedAddress.startsWith('__INCOMING__UNKNOWN__') ||
+        normalizedName.startsWith('__INCOMING__UNKNOWN__');
+
+    return normalizedAddress == '__SELF__' ||
+        normalizedName == '__SELF__' ||
+        isSystemSender ||
+        isIncomingUnknown;
   }
 
   Future<int?> _resolveSelfContactId() async {
     final prefs = await SharedPreferences.getInstance();
-    
-    final myAddr = prefs.getString('myAddr').toString();
-    final myCallSign = prefs.getString('callSign').toString();
-  
+    final myAddr = _normalizeAddress(
+      (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
+    );
+    final myCallSign = (prefs.getString('callSign') ?? '').trim();
 
     if (_selfContactId != null) return _selfContactId;
     if (myAddr.isEmpty) return null;
@@ -105,6 +123,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
           }
         }
       }
+      
       if (selfRecord == null && _selfCallSign.isNotEmpty) {
         for (final contact in uniqueContacts) {
           if (contact.displayName.trim().toUpperCase() == _selfCallSign) {
@@ -146,22 +165,30 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
   Future<void> _createGroup() async {
     final groupName = _nameController.text.trim();
+    debugPrint('----------------- _createGroup ----------------------');
+    debugPrint('Group name: $groupName');
     if (groupName.isEmpty) {
-      // ScaffoldMessenger.of(context).showSnackBar(
-      //   const SnackBar(content: Text('Please enter a group name')),
-      // );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a group name')),
+      );
       return;
     }
     if (_selectedContactIds.isEmpty) {
-      // ScaffoldMessenger.of(context).showSnackBar(
-      //   const SnackBar(content: Text('Please select at least one member')),
-      // );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select at least one member')),
+      );
       return;
     }
+
     setState(() => _isSubmitting = true);
+    debugPrint('Group name: $groupName');
+    debugPrint('Selected contact IDs: ${_selectedContactIds.join(', ')}');
+
     try {
       final sortedSelected = _selectedContactIds.toList()..sort();
+      debugPrint('Sorted selected: ${sortedSelected.join(', ')}');
       final ownerContactId = await _resolveSelfContactId();
+      debugPrint('Owner contact ID: $ownerContactId');
       if (ownerContactId == null) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -173,14 +200,105 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
         setState(() => _isSubmitting = false);
         return;
       }
+
+      final groupUuid =
+          'grp${ownerContactId.toString()}_${DateTime.now().toUtc().microsecondsSinceEpoch}';
+      
+      debugPrint('Group UUID: $groupUuid');
+
       final groupId = await LocalDatabaseService.instance.createGroupWithMembers(
         groupName: groupName,
+        groupUuid: groupUuid,
         ownerContactId: ownerContactId,
-        memberContactIds: sortedSelected,
+        memberContactIds: sortedSelected.map((id) => id).toList(),
       );
+
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final savedIp = prefs.getString('device_ip')?.trim();
+        final savedPort = prefs.getString('device_port')?.trim();
+        final ownerAddr = _selfAddr.isNotEmpty
+            ? _selfAddr
+            : _normalizeAddress(
+                (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '')
+                    .trim(),
+              );
+
+        final ip = (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
+        final port = (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
+
+        if (ip.isNotEmpty) {
+          final parsedPort = int.tryParse(port);
+          final uriBase = Uri(
+            scheme: 'http',
+            host: ip,
+            port: parsedPort ?? 80,
+            path: '/send',
+          );
+
+          final selectedById = _contacts
+              .where((c) => c.id != null && _selectedContactIds.contains(c.id))
+              .toList();
+          final targetAddresses = selectedById
+              .map((c) => _normalizeAddress(c.loraAddress))
+              .where((addr) => addr.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort();
+
+          if (targetAddresses.isNotEmpty && ownerAddr.isNotEmpty) {
+            final allMemberAddresses = <String>{ownerAddr, ...targetAddresses}
+              ..removeWhere((addr) => addr.isEmpty);
+            final invitePayload = StringBuffer()
+              ..write('GROUP_INVITE|')
+              ..write(groupUuid)
+              ..write('|')
+              ..write(groupName)
+              ..write('|')
+              ..write(ownerAddr)
+              ..write('|')
+              ..write(allMemberAddresses.join(','));
+
+            for (final target in targetAddresses) {
+              try {
+                final uri = uriBase.replace(
+                    queryParameters: <String, String>{
+                    'msg': invitePayload.toString(),
+                    'to': target,
+                  },
+                );
+                await http.get(uri).timeout(
+                  const Duration(seconds: 5),
+                );
+              } catch (_) {}
+            }
+            
+          } else if (ownerAddr.isEmpty) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Missing owner address, invite not sent'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+          } else if (selectedById.isNotEmpty && targetAddresses.isEmpty) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Selected members have invalid LoRa addresses'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+          }
+        }
+      } catch (_) {}
       if (!mounted) return;
       Navigator.of(context).pop(
-        CreatedGroupPayload(groupId: groupId, groupName: groupName),
+        CreatedGroupPayload(
+          groupId: groupId,
+          groupUuid: groupUuid,
+          groupName: groupName,
+        ),
       );
     } catch (_) {
       if (!mounted) return;
@@ -192,6 +310,11 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
       );
       setState(() => _isSubmitting = false);
     }
+
+    debugPrint('----------------- _createGroup ----------------------');
+    debugPrint('Group created successfully');
+    debugPrint('Group name: $groupName');
+    debugPrint('Selected contact IDs: ${_selectedContactIds.join(', ')}');
   }
 
   @override
@@ -273,7 +396,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                         itemBuilder: (context, index) {
                           final contact = _contacts[index];
                           final isSelected =
-                              _selectedContactIds.contains(contact.id);
+                              _selectedContactIds.contains(_normalizeAddress(contact.loraAddress));
                           return SizedBox(
                             height: 52,
                             child: CheckboxListTile(
@@ -292,9 +415,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                                       if (contact.id == null) return;
                                       setState(() {
                                         if (value == true) {
-                                          _selectedContactIds.add(contact.id!);
+                                          _selectedContactIds.add(_normalizeAddress(contact.loraAddress));
                                         } else {
-                                          _selectedContactIds.remove(contact.id!);
+                                          _selectedContactIds.remove(_normalizeAddress(contact.loraAddress));
                                         }
                                       });
                                     },

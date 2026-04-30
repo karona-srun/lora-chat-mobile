@@ -88,7 +88,8 @@ class GroupRecord {
       id: map['id'] as int?,
       groupUuid: map['group_uuid'] as String,
       groupName: map['group_name'] as String,
-      ownerContactId: map['owner_contact_id'] as int,
+      ownerContactId:
+          int.tryParse(map['owner_contact_id']?.toString() ?? '') ?? 0,
       createdAt: map['created_at'] as String?,
       updatedAt: map['updated_at'] as String?,
     );
@@ -507,7 +508,10 @@ CREATE TABLE messages (
     required List<String> memberContactIds,
   }) async {
     final db = await database;
-    final uniqueMembers = <String>{...memberContactIds, ownerContactId.toString()}.toList();
+    final uniqueMembers = <int>{
+      ...memberContactIds.map((e) => int.tryParse(e.trim())).whereType<int>(),
+      ownerContactId,
+    }.toList();
 
     return db.transaction((txn) async {
       final groupId = await txn.insert('groups', {
@@ -550,11 +554,12 @@ ORDER BY COALESCE(g.updated_at, g.created_at) DESC;
 ''');
     return rows.map((row) {
       return GroupSummaryRecord(
-        groupId: row['group_id'] as int,
+        groupId: int.tryParse(row['group_id']?.toString() ?? '') ?? 0,
         groupUuid: row['group_uuid'] as String,
         groupName: row['group_name'] as String,
-        memberCount: (row['member_count'] as int?) ?? 0,
-        ownerContactId: row['owner_contact_id'] as int,
+        memberCount: int.tryParse(row['member_count']?.toString() ?? '') ?? 0,
+        ownerContactId:
+            int.tryParse(row['owner_contact_id']?.toString() ?? '') ?? 0,
         updatedAt: (row['updated_at'] as String?) ?? '',
       );
     }).toList();

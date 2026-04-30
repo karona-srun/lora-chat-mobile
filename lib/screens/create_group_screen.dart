@@ -206,11 +206,33 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
       
       debugPrint('Group UUID: $groupUuid');
 
+      // Convert selected addresses into DB contact ids before creating members.
+      final selectedByAddress = _contacts
+          .where(
+            (c) =>
+                _normalizeAddress(c.loraAddress).isNotEmpty &&
+                _selectedContactIds.contains(_normalizeAddress(c.loraAddress)),
+          )
+          .toList();
+      final resolvedMemberIds = <String>[];
+      for (final contact in selectedByAddress) {
+        final addr = _normalizeAddress(contact.loraAddress);
+        if (addr.isEmpty) continue;
+        final resolvedId = await LocalDatabaseService.instance.upsertContact(
+          ContactRecord(
+            loraAddress: addr,
+            displayName:
+                contact.displayName.trim().isNotEmpty ? contact.displayName.trim() : '0x$addr',
+          ),
+        );
+        resolvedMemberIds.add(resolvedId.toString());
+      }
+
       final groupId = await LocalDatabaseService.instance.createGroupWithMembers(
         groupName: groupName,
         groupUuid: groupUuid,
         ownerContactId: ownerContactId,
-        memberContactIds: sortedSelected.map((id) => id).toList(),
+        memberContactIds: resolvedMemberIds,
       );
 
       try {
@@ -237,7 +259,11 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
           );
 
           final selectedById = _contacts
-              .where((c) => c.id != null && _selectedContactIds.contains(c.id))
+              .where(
+                (c) =>
+                    _normalizeAddress(c.loraAddress).isNotEmpty &&
+                    _selectedContactIds.contains(_normalizeAddress(c.loraAddress)),
+              )
               .toList();
           final targetAddresses = selectedById
               .map((c) => _normalizeAddress(c.loraAddress))
@@ -247,8 +273,19 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             ..sort();
 
           if (targetAddresses.isNotEmpty && ownerAddr.isNotEmpty) {
-            final allMemberAddresses = <String>{ownerAddr, ...targetAddresses}
-              ..removeWhere((addr) => addr.isEmpty);
+            final ownerName = _selfCallSign.trim().isNotEmpty
+                ? _selfCallSign.trim()
+                : 'Owner';
+            final allMemberAddresses = <String>{
+              '$ownerName:$ownerAddr',
+              ...selectedById.map((contact) {
+                final name = contact.displayName.trim().isNotEmpty
+                    ? contact.displayName.trim()
+                    : 'Node';
+                final addr = _normalizeAddress(contact.loraAddress);
+                return '$name:$addr';
+              }),
+            }..removeWhere((member) => member.endsWith(':'));
             final invitePayload = StringBuffer()
               ..write('GROUP_INVITE|')
               ..write(groupUuid)
@@ -258,6 +295,18 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
               ..write(ownerAddr)
               ..write('|')
               ..write(allMemberAddresses.join(','));
+
+            // Broadcast once so all members can receive the same invite notification.
+            try {
+              final broadcastUri = uriBase.replace(
+                queryParameters: <String, String>{
+                  'msg': invitePayload.toString(),
+                },
+              );
+              await http.get(broadcastUri).timeout(
+                const Duration(seconds: 5),
+              );
+            } catch (_) {}
 
             for (final target in targetAddresses) {
               try {
@@ -300,7 +349,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
           groupName: groupName,
         ),
       );
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

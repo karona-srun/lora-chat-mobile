@@ -212,7 +212,13 @@ class MessageBackgroundService {
     if (ownerAddr.isNotEmpty) memberAddrs.add(ownerAddr);
     if (membersRaw.isNotEmpty) {
       for (final part in membersRaw.split(',')) {
-        final addr = _normalizeAddress(part);
+        final rawMember = part.trim();
+        final addrPart = rawMember.contains(':')
+            ? rawMember.split(':').last.trim()
+            : rawMember.contains('&')
+                ? rawMember.split('&').last.trim()
+                : rawMember;
+        final addr = _normalizeAddress(addrPart);
         if (addr.isNotEmpty) {
           memberAddrs.add(addr);
         }
@@ -298,8 +304,57 @@ class MessageBackgroundService {
       // return _IncomingMessage(sender: 'Via relay -> 0x$destHex', text: text);
       return _IncomingMessage(sender: 'New message', text: text);
     }
-
-    return _IncomingMessage(sender: 'New message', text: message);
+    if (message.contains('GROUP_INVITE|') || message.contains('GROUP_INVITEI')) {
+      // create group is auto when got group invite into database
+      
+      final groupUuid = message.split('|')[3];
+      final groupName = message.split('|')[4];
+      final ownerAddr = message.split('|')[5];
+      final members = message.split('|')[6];
+      final ownerContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: ownerAddr,
+          displayName: ownerAddr,
+        ),
+      );
+      await LocalDatabaseService.instance.upsertGroup(
+        GroupRecord(
+          groupUuid: groupUuid,
+          groupName: groupName,
+          ownerContactId: ownerContactId,
+        ),
+      );
+      for (final member in members.split(',')) {
+        final memberContactId = await LocalDatabaseService.instance.upsertContact(
+          ContactRecord(
+            loraAddress: member,
+            displayName: member,
+          ),
+        );
+        await LocalDatabaseService.instance.upsertGroupMember(
+          GroupMemberRecord(
+            groupUuid: groupUuid,
+            contactId: memberContactId,
+            role: GroupMemberRole.member,
+            isActive: true,
+          ),
+        );
+      }
+      return _IncomingMessage(sender: 'New group invite', text: message.trim());
+    }
+    if (message.contains('GROUP_REMOVE|')) {
+      return _IncomingMessage(sender: 'New group remove', text: message.trim());
+    }
+    if (message.contains('GROUP_LEAVE|')) {
+      return _IncomingMessage(sender: 'New group leave', text: message.trim());
+    }
+    final msg = message.split('|');
+    final text = msg[2];
+    if(message.contains('GROUP_MSG')){
+      return _IncomingMessage(sender: "Group message", text: msg[4].trimLeft());
+    }else{
+      return _IncomingMessage(sender: "Direct message", text: text.trimLeft());
+    }
   }
 
   static String _newMessageUuid(String prefix) {
@@ -367,9 +422,9 @@ class MessageBackgroundService {
     // Respect setting: only persist incoming messages when local DB saving is enabled.
     if (!saveDbEnabled) return;
     if (_isIgnoredStatusNoise(raw)) return;
-    if (raw.startsWith('GROUP_INVITE|') ||
-        raw.startsWith('GROUP_REMOVE|') ||
-        raw.startsWith('GROUP_LEAVE|')) {
+    if (raw.contains('GROUP_INVITE|') || raw.contains('GROUP_INVITET|')) {
+      // Auto-create/update group and members from invite payload.
+      await _handleGroupInvite(raw);
       return;
     }
 

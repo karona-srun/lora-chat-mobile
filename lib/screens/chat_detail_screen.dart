@@ -637,7 +637,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       if (target != null && target.isNotEmpty) {
         query['to'] = target;
       }
-
+      
       final uri = _buildUri('/send', query);
       final response = await http.get(uri).timeout(
         const Duration(seconds: 5),

@@ -160,6 +160,10 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       final contacts = await LocalDatabaseService.instance.listContacts();
       if (!mounted) return;
 
+      debugPrint('----------------- _loadGroupDetails details ----------------------');
+      debugPrint('Details: ${details}');
+
+
       debugPrint('----------------- _loadGroupDetails ----------------------');
       debugPrint('Contacts: ${contacts.map((e) => e.displayName).join(', ')}');
 

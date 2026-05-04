@@ -306,40 +306,58 @@ class MessageBackgroundService {
     }
     if (message.contains('GROUP_INVITE|') || message.contains('GROUP_INVITEI')) {
       // create group is auto when got group invite into database
-      
+      await LocalDatabaseService.instance.ensureInitialized();
+
       final groupUuid = message.split('|')[3];
       final groupName = message.split('|')[4];
-      final ownerAddr = message.split('|')[5];
+      final ownerAddrRaw = message.split('|')[5];
       final members = message.split('|')[6];
+      final ownerAddr = _normalizeAddress(ownerAddrRaw);
       final ownerContactId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
-          loraAddress: ownerAddr,
-          displayName: ownerAddr,
+          loraAddress: ownerAddr.isNotEmpty ? ownerAddr : ownerAddrRaw.trim(),
+          displayName: ownerAddr.isNotEmpty ? ownerAddr : ownerAddrRaw.trim(),
         ),
       );
-      await LocalDatabaseService.instance.upsertGroup(
-        GroupRecord(
-          groupUuid: groupUuid,
-          groupName: groupName,
-          ownerContactId: ownerContactId,
-        ),
-      );
-      for (final member in members.split(',')) {
-        final memberContactId = await LocalDatabaseService.instance.upsertContact(
+      // `members` is CSV like: LM-1:0001,LM-2:0002,LM-3:0003 — resolve to contact row ids.
+      final resolvedMemberContactIds = <String>[];
+      for (final raw in members.split(',')) {
+        final token = raw.trim();
+        if (token.isEmpty) continue;
+        final addrPart = token.contains(':')
+            ? token.split(':').last.trim()
+            : token.contains('&')
+                ? token.split('&').last.trim()
+                : token;
+        final namePart = token.contains(':')
+            ? token.split(':').first.trim()
+            : token.contains('&')
+                ? token.split('&').first.trim()
+                : '';
+        final addr = _normalizeAddress(addrPart);
+        if (addr.isEmpty) continue;
+        final id = await LocalDatabaseService.instance.upsertContact(
           ContactRecord(
-            loraAddress: member,
-            displayName: member,
+            loraAddress: addr,
+            displayName: namePart.isNotEmpty ? namePart : '0x$addr',
           ),
         );
-        await LocalDatabaseService.instance.upsertGroupMember(
-          GroupMemberRecord(
-            groupUuid: groupUuid,
-            contactId: memberContactId,
-            role: GroupMemberRole.member,
-            isActive: true,
-          ),
-        );
+        resolvedMemberContactIds.add(id.toString());
       }
+
+      final groupId = await LocalDatabaseService.instance.createGroupWithMembers(
+        groupName: groupName,
+        groupUuid: groupUuid,
+        ownerContactId: ownerContactId,
+        memberContactIds: resolvedMemberContactIds,
+      );
+
+      debugPrint('Group created: $groupId');
+      debugPrint('Group name: $groupName');
+      debugPrint('Group UUID: $groupUuid');
+      debugPrint('Owner contact ID: $ownerContactId');
+      debugPrint('Members: $members');
+      debugPrint('Member contact IDs: ${resolvedMemberContactIds.join(', ')}');
       return _IncomingMessage(sender: 'New group invite', text: message.trim());
     }
     if (message.contains('GROUP_REMOVE|')) {

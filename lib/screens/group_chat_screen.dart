@@ -52,6 +52,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   int? _lastRxReceivedCount;
   int _currentMessageLength = 0;
   final Map<int, String> _messageUuidByIndex = <int, String>{};
+  /// Avoid overlapping `/api/status` polls (timer can fire while a request is still in flight).
+  bool _fetchMessagesInFlight = false;
+  /// LoRa firmware often cannot serve `/api/status` while handling `/send`; pause polling during outbound delivery.
+  bool _suspendGroupStatusPoll = false;
 
   @override
   void initState() {
@@ -318,12 +322,31 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
+  /// Resolves a 4-hex node id for routing, even if [GroupMemberContactRecord.loraAddress]
+  /// was stored as `LM-2:0002` style.
+  String? _hexTargetFromMember(GroupMemberContactRecord member) {
+    var h = _normalizeAddress(member.loraAddress);
+    if (h.isNotEmpty) return h;
+    for (final raw in [member.loraAddress, member.displayName]) {
+      final s = raw.trim();
+      if (s.contains(':')) {
+        h = _normalizeAddress(s.split(':').last);
+        if (h.isNotEmpty) return h;
+      }
+      if (s.contains('&')) {
+        h = _normalizeAddress(s.split('&').last);
+        if (h.isNotEmpty) return h;
+      }
+    }
+    return null;
+  }
+
   Future<int?> _findContactIdForAddress(String addressHex) async {
     final normalized = _normalizeAddress(addressHex);
     if (normalized.isEmpty) return null;
     for (final member in _groupMembers) {
-      final memberAddr = _normalizeAddress(member.loraAddress);
-      if (memberAddr == normalized) return member.contactId;
+      final memberAddr = _hexTargetFromMember(member);
+      if (memberAddr != null && memberAddr == normalized) return member.contactId;
     }
     final id = await LocalDatabaseService.instance.upsertContact(
       ContactRecord(
@@ -335,14 +358,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   List<String> _resolveTargetsFromMembers(List<GroupMemberContactRecord> members) {
+    debugPrint('----------------- _resolveTargetsFromMembers members ----------------------');
+    debugPrint('Members: ${members.map((e) => e.displayName).join(', ')}');
+    debugPrint('selfAddr: ${_selfAddr}');
+    debugPrint('targetHexes: ${_targetHexes}');
     final uniqueTargets = <String>{};
     for (final member in members) {
-      final normalizedAddress = _normalizeAddress(member.loraAddress);
-      if (normalizedAddress.isEmpty) continue;
+      final normalizedAddress = _hexTargetFromMember(member);
+      if (normalizedAddress == null || normalizedAddress.isEmpty) continue;
       if (normalizedAddress == '__SELF__') continue;
       if (_selfAddr.isNotEmpty && normalizedAddress == _selfAddr) continue;
       uniqueTargets.add(normalizedAddress);
     }
+    debugPrint('----------------- _resolveTargetsFromMembers uniqueTargets ----------------------');
+    debugPrint('UniqueTargets: ${uniqueTargets.toList()}');
     return uniqueTargets.toList()..sort();
   }
 
@@ -367,8 +396,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final normalized = _normalizeAddress(addressHex);
     if (normalized.isEmpty) return false;
     for (final member in _groupMembers) {
-      final memberAddr = _normalizeAddress(member.loraAddress);
-      if (memberAddr == normalized) return true;
+      final memberAddr = _hexTargetFromMember(member);
+      if (memberAddr != null && memberAddr == normalized) return true;
     }
     return false;
   }
@@ -377,8 +406,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final normalized = _normalizeAddress(addressHex);
     if (normalized.isEmpty) return 'Unknown node';
     for (final member in _groupMembers) {
-      final memberAddr = _normalizeAddress(member.loraAddress);
-      if (memberAddr == normalized) {
+      final memberAddr = _hexTargetFromMember(member);
+      if (memberAddr != null && memberAddr == normalized) {
         final name = member.displayName.trim();
         if (name.isNotEmpty) return name;
       }
@@ -434,11 +463,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   Future<void> _fetchMessages() async {
     if (!_isConnected || deviceIp.trim().isEmpty) return;
+    if (_suspendGroupStatusPoll) return;
+    if (_fetchMessagesInFlight) return;
+    _fetchMessagesInFlight = true;
     try {
       final uri = _buildUri('/api/status');
       final response = await http.get(uri).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw Exception('Connection timeout'),
+        const Duration(seconds: 10),
+        onTimeout: () => throw TimeoutException('/api/status'),
       );
       if (response.statusCode != 200) return;
 
@@ -535,16 +567,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       ).firstMatch(lastRx);
       if (relay != null) {
         final destHex = (relay.group(1) ?? '').toUpperCase();
+        final relayDest = _normalizeAddress(destHex);
         final extracted = _extractGroupWirePayload(relay.group(2) ?? '');
         if (extracted.groupId != null && extracted.groupId != widget.groupId) {
           return;
         }
         final parsed = _splitSenderFromPayload(extracted.payload);
         if (parsed.text.isEmpty) return;
-        if (_targetHexes.isNotEmpty && !_targetHexes.contains(destHex)) return;
+        if (_targetHexes.isNotEmpty &&
+            relayDest.isNotEmpty &&
+            !_targetHexes.contains(relayDest)) {
+          return;
+        }
         if (!mounted) return;
         int? fromContactId;
-        final relayDest = _normalizeAddress(destHex);
         if (relayDest.isNotEmpty) {
           fromContactId = await _findContactIdForAddress(relayDest);
         }
@@ -618,8 +654,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         );
       });
       _scrollToBottom();
+    } on TimeoutException catch (_) {
+      // Busy radio / device handling send — avoid noisy "failed fetch" spam.
+      debugPrint('Group chat: /api/status timed out (will retry on next poll)');
     } catch (e) {
       debugPrint('Failed to fetch group messages: $e');
+    } finally {
+      _fetchMessagesInFlight = false;
     }
   }
  
@@ -655,10 +696,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     required String plainText,
     required int outgoingIndex,
     required List<String> sendTargets,
-    required String groupUuid,
+    /// Numeric DB group id — must match firmware / local parser (`GROUP_MSG|<id>|...`).
+    required int groupWireId,
   }) async {
     final senderName = _selfCallSign.isNotEmpty ? _selfCallSign : 'Unknown';
-    final payloadWithName = 'GROUP_MSG|$groupUuid|$senderName: $plainText';
+    final payloadWithName =
+        'GROUP_MSG|$groupWireId|$senderName: $plainText';
+    _suspendGroupStatusPoll = true;
     try {
       var ackedCount = 0;
       var noAckCount = 0;
@@ -666,15 +710,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
       for (final target in sendTargets) {
         try {
+          // Firmware handleSend: /send?msg=...&to=HEX (same as direct chat).
           final query = <String, String>{
             'msg': payloadWithName,
             'to': target,
-            'groupUuid': groupUuid,
           };
           final uri = _buildUri('/send', query);
           final response = await http.get(uri).timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => throw Exception('Connection timeout'),
+            const Duration(seconds: 15),
+            onTimeout: () => throw TimeoutException('/send'),
           );
           final body = _decodeResponseBody(response).trim();
 
@@ -710,6 +754,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         _currentMessageLength = 0;
       });
       if (!mounted) return;
+    } finally {
+      _suspendGroupStatusPoll = false;
     }
   }
 
@@ -729,8 +775,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
 
     final details = await LocalDatabaseService.instance.getGroupDetails(widget.groupId);
-    if (!mounted || widget.groupUuid != sendGroupUuid) return;
-    if (details == null || details.groupUuid != sendGroupUuid) {
+
+    if (!mounted) return;
+    if (details == null ||
+        details.groupUuid.trim() != sendGroupUuid.trim()) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Could not load this group. Try opening it again.'),
@@ -739,6 +787,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       );
       return;
     }
+    debugPrint('----------------- _sendMessage details ----------------------');
+    debugPrint('Details: ${details.members.map((e) => e.displayName).join(', ')}');
+    debugPrint('sendGroupUuid: ${sendGroupUuid}');
     final sendTargets = _resolveTargetsFromMembers(details.members);
     if (sendTargets.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -790,9 +841,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       plainText: messageText,
       outgoingIndex: outgoingIndex,
       sendTargets: sendTargets,
-      groupUuid: sendGroupUuid,
+      groupWireId: widget.groupId,
     );
-    _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.acked);
   }
 
   void _updateOutgoingDeliveryStatus(int index, MessageDeliveryStatus status) {
@@ -840,8 +890,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     final String sendGroupUuid = widget.groupUuid;
     final details = await LocalDatabaseService.instance.getGroupDetails(widget.groupId);
-    if (!mounted || widget.groupUuid != sendGroupUuid) return;
-    if (details == null || details.groupUuid != sendGroupUuid) {
+    if (!mounted) return;
+    if (details == null ||
+        details.groupUuid.trim() != sendGroupUuid.trim()) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -875,7 +926,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       plainText: messageText,
       outgoingIndex: index,
       sendTargets: sendTargets,
-      groupUuid: widget.groupUuid,
+      groupWireId: widget.groupId,
     );
   }
 

@@ -50,12 +50,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   int? _selfContactId;
   String _lastRxText = '';
   int? _lastRxReceivedCount;
+  int? _lastDbSyncedReceivedCount;
   int _currentMessageLength = 0;
   final Map<int, String> _messageUuidByIndex = <int, String>{};
   /// Avoid overlapping `/api/status` polls (timer can fire while a request is still in flight).
   bool _fetchMessagesInFlight = false;
   /// LoRa firmware often cannot serve `/api/status` while handling `/send`; pause polling during outbound delivery.
   bool _suspendGroupStatusPoll = false;
+  DateTime? _lastSoftAckAt;
+  final Map<int, DateTime> _outgoingCreatedAtByIndex = <int, DateTime>{};
+  static const Duration _softAckMatchWindow = Duration(minutes: 2);
 
   @override
   void initState() {
@@ -85,6 +89,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _lastRxText = '';
       _lastRxReceivedCount = null;
       _messageUuidByIndex.clear();
+      _outgoingCreatedAtByIndex.clear();
       _messages
         ..clear()
         ..add(
@@ -230,9 +235,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   String _senderLabelForContactId(String contactId) {
-    if (_selfContactId != null && contactId == _selfContactId) return 'You';
+    if (_selfContactId != null && contactId == _selfContactId.toString()) {
+      return 'You';
+    }
     for (final member in _groupMembers) {
-      if (member.contactId == contactId) {
+      if (member.contactId.toString() == contactId) {
         final name = member.displayName.trim();
         if (name.isNotEmpty) return name;
       }
@@ -266,6 +273,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (!mounted) return;
       setState(() {
         _messageUuidByIndex.clear();
+        _outgoingCreatedAtByIndex.clear();
         _messages
           ..clear()
           ..addAll(
@@ -273,6 +281,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               final i = entry.key;
               final record = entry.value;
               _messageUuidByIndex[i] = record.messageUuid;
+              final createdAtRaw = record.createdAt ??
+                  record.sentAt ??
+                  record.receivedAt;
+              final createdAt = DateTime.tryParse(createdAtRaw ?? '')?.toLocal();
+              if (createdAt != null) {
+                _outgoingCreatedAtByIndex[i] = createdAt;
+              }
               return ChatMessage(
                 text: record.payload,
                 sender: _senderLabelForContactId(record.fromContactId.toString()),
@@ -392,16 +407,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return data;
   }
 
-  bool _isGroupMemberAddress(String addressHex) {
-    final normalized = _normalizeAddress(addressHex);
-    if (normalized.isEmpty) return false;
-    for (final member in _groupMembers) {
-      final memberAddr = _hexTargetFromMember(member);
-      if (memberAddr != null && memberAddr == normalized) return true;
-    }
-    return false;
-  }
-
   String _senderLabelForAddress(String addressHex) {
     final normalized = _normalizeAddress(addressHex);
     if (normalized.isEmpty) return 'Unknown node';
@@ -422,6 +427,55 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     // Keep emoji/non-ASCII content, only strip control characters.
     text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
     return text;
+  }
+
+  void _softAckOutgoingIfMatched(String incomingText) {
+    final text = incomingText.trim();
+    if (text.isEmpty) return;
+
+    // Avoid flapping if firmware repeats lastReceived quickly.
+    final now = DateTime.now();
+    final last = _lastSoftAckAt;
+    if (last != null && now.difference(last) < const Duration(milliseconds: 600)) {
+      return;
+    }
+
+    // Find the most recent outgoing message from "You" that matches this payload
+    // and is currently "No Ack"/"Sending"/"Failed". Upgrade it to ACKed.
+    for (var i = _messages.length - 1; i >= 0; i -= 1) {
+      final m = _messages[i];
+      if (m.isSystem) continue;
+      if (m.sender != 'You') continue;
+      if (m.text.trim() != text) continue;
+      final outgoingTime = _outgoingCreatedAtByIndex[i] ?? m.timestamp;
+      if (now.difference(outgoingTime).abs() > _softAckMatchWindow) {
+        continue;
+      }
+
+      final current = m.deliveryStatus;
+      if (current == MessageDeliveryStatus.acked) return;
+      if (current != MessageDeliveryStatus.noAck &&
+          current != MessageDeliveryStatus.sending &&
+          current != MessageDeliveryStatus.failed) {
+        continue;
+      }
+
+      _lastSoftAckAt = now;
+      _updateOutgoingDeliveryStatus(i, MessageDeliveryStatus.acked);
+      return;
+    }
+  }
+
+  ({String senderAddr, String text})? _tryExtractSenderAddrPayload(String payload) {
+    final match =
+        RegExp(r'^([^&:|]+)&([0-9A-Fa-f]{2,8})\s*:\s*(.+)$').firstMatch(
+      payload.trim(),
+    );
+    if (match == null) return null;
+    final senderAddr = _normalizeAddress(match.group(2) ?? '');
+    final text = _sanitizeIncomingText(match.group(3) ?? '');
+    if (senderAddr.isEmpty || text.isEmpty) return null;
+    return (senderAddr: senderAddr, text: text);
   }
 
   ({String? senderName, String text}) _splitSenderFromPayload(String payload) {
@@ -449,16 +503,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return (senderName: null, text: _sanitizeIncomingText(trimmed));
   }
 
-  ({int? groupId, String payload}) _extractGroupWirePayload(String payload) {
+  ({String? groupToken, String payload}) _extractGroupWirePayload(String payload) {
     final trimmed = payload.trim();
-    final match = RegExp(r'^GROUP_MSG\|(\d+)\|(.+)$').firstMatch(trimmed);
-    if (match == null) return (groupId: null, payload: payload);
-    final parsedGroupId = int.tryParse(match.group(1) ?? '');
+    final match = RegExp(r'^GROUP_MSG\|([^|]+)\|(.+)$').firstMatch(trimmed);
+    if (match == null) return (groupToken: null, payload: payload);
+    final token = (match.group(1) ?? '').trim();
     final wrappedPayload = (match.group(2) ?? '').trim();
-    if (parsedGroupId == null || wrappedPayload.isEmpty) {
-      return (groupId: null, payload: payload);
+    if (token.isEmpty || wrappedPayload.isEmpty) {
+      return (groupToken: null, payload: payload);
     }
-    return (groupId: parsedGroupId, payload: wrappedPayload);
+    return (groupToken: token, payload: wrappedPayload);
   }
 
   Future<void> _fetchMessages() async {
@@ -495,6 +549,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       final currentReceivedCount = int.tryParse(
         (traffic['received'] ?? '').toString(),
       );
+      if (_saveDatabaseLocallyEnabled &&
+          currentReceivedCount != null &&
+          currentReceivedCount != _lastDbSyncedReceivedCount) {
+        _lastDbSyncedReceivedCount = currentReceivedCount;
+        // Keep current chat in sync even if live parser misses a wire variant.
+        await _loadGroupMessagesFromDb();
+      }
       final isDuplicate = lastRx == _lastRxText &&
           currentReceivedCount != null &&
           _lastRxReceivedCount != null &&
@@ -506,6 +567,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         _lastRxReceivedCount = currentReceivedCount;
         return;
       }
+
       if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(lastRx)) {
         _lastRxText = lastRx;
         _lastRxReceivedCount = currentReceivedCount;
@@ -527,13 +589,27 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (tagged != null) {
         final fromHex = _normalizeAddress(tagged.group(1) ?? '');
         final extracted = _extractGroupWirePayload(tagged.group(2) ?? '');
-        if (extracted.groupId != null && extracted.groupId != widget.groupId) {
+        if (extracted.groupToken != null &&
+            extracted.groupToken!.trim() != widget.groupUuid.trim()) {
+          return;
+        }
+        final senderAddrPayload = _tryExtractSenderAddrPayload(extracted.payload);
+        if (_selfAddr.isNotEmpty &&
+            senderAddrPayload != null &&
+            senderAddrPayload.senderAddr == _selfAddr) {
+          _softAckOutgoingIfMatched(senderAddrPayload.text);
           return;
         }
         final parsed = _splitSenderFromPayload(extracted.payload);
         if (parsed.text.isEmpty) return;
-        if (fromHex == _selfAddr) return;
-        if (!_isGroupMemberAddress(fromHex)) return;
+        if (fromHex == _selfAddr) {
+          // If we see our own group payload come back in lastReceived, treat it as
+          // a delivery confirmation and upgrade the latest matching outgoing message.
+          _softAckOutgoingIfMatched(parsed.text);
+          return;
+        }
+        // Do not hard-drop by cached member list; membership can be stale while
+        // user is already in chat. If group token matches, render the message.
 
         if (!mounted) return;
         final fromContactId = await _findContactIdForAddress(fromHex);
@@ -569,16 +645,21 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         final destHex = (relay.group(1) ?? '').toUpperCase();
         final relayDest = _normalizeAddress(destHex);
         final extracted = _extractGroupWirePayload(relay.group(2) ?? '');
-        if (extracted.groupId != null && extracted.groupId != widget.groupId) {
+        if (extracted.groupToken != null &&
+            extracted.groupToken!.trim() != widget.groupUuid.trim()) {
+          return;
+        }
+        final senderAddrPayload = _tryExtractSenderAddrPayload(extracted.payload);
+        if (_selfAddr.isNotEmpty &&
+            senderAddrPayload != null &&
+            senderAddrPayload.senderAddr == _selfAddr) {
+          _softAckOutgoingIfMatched(senderAddrPayload.text);
           return;
         }
         final parsed = _splitSenderFromPayload(extracted.payload);
         if (parsed.text.isEmpty) return;
-        if (_targetHexes.isNotEmpty &&
-            relayDest.isNotEmpty &&
-            !_targetHexes.contains(relayDest)) {
-          return;
-        }
+        // Do not hard-drop relayed frames using cached target list. While user is
+        // active in chat, members/targets may lag behind and hide valid messages.
         if (!mounted) return;
         int? fromContactId;
         if (relayDest.isNotEmpty) {
@@ -617,7 +698,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       // Some firmwares store plain payloads in lastReceived.
       // Accept only explicit "sender: message" payloads to avoid showing noise.
       final extracted = _extractGroupWirePayload(lastRx);
-      if (extracted.groupId != null && extracted.groupId != widget.groupId) {
+      if (extracted.groupToken != null &&
+          extracted.groupToken!.trim() != widget.groupUuid.trim()) {
+        return;
+      }
+      final senderAddrPayload = _tryExtractSenderAddrPayload(extracted.payload);
+      if (_selfAddr.isNotEmpty &&
+          senderAddrPayload != null &&
+          senderAddrPayload.senderAddr == _selfAddr) {
+        _softAckOutgoingIfMatched(senderAddrPayload.text);
         return;
       }
       final plain = _splitSenderFromPayload(extracted.payload);
@@ -625,6 +714,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (plain.text.isEmpty || sender.isEmpty) return;
       if (_selfCallSign.isNotEmpty &&
           sender.toUpperCase() == _selfCallSign.toUpperCase()) {
+        _softAckOutgoingIfMatched(plain.text);
         return;
       }
 
@@ -697,11 +787,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     required int outgoingIndex,
     required List<String> sendTargets,
     /// Numeric DB group id — must match firmware / local parser (`GROUP_MSG|<id>|...`).
-    required int groupWireId,
+    required String groupWireId,
   }) async {
     final senderName = _selfCallSign.isNotEmpty ? _selfCallSign : 'Unknown';
+    final senderAddr = _selfAddr;
     final payloadWithName =
-        'GROUP_MSG|$groupWireId|$senderName: $plainText';
+        'GROUP_MSG|$groupWireId|$senderName&$senderAddr: $plainText';
     _suspendGroupStatusPoll = true;
     try {
       var ackedCount = 0;
@@ -790,6 +881,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     debugPrint('----------------- _sendMessage details ----------------------');
     debugPrint('Details: ${details.members.map((e) => e.displayName).join(', ')}');
     debugPrint('sendGroupUuid: ${sendGroupUuid}');
+    
     final sendTargets = _resolveTargetsFromMembers(details.members);
     if (sendTargets.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -806,11 +898,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _groupMembers = details.members;
       _targetHexes = sendTargets;
       outgoingIndex = _messages.length;
+      final now = DateTime.now();
+      _outgoingCreatedAtByIndex[outgoingIndex] = now;
       _messages.add(
         ChatMessage(
           text: messageText,
           sender: 'You',
-          timestamp: DateTime.now(),
+          timestamp: now,
           isSystem: false,
           deliveryStatus: MessageDeliveryStatus.sending,
         ),
@@ -841,7 +935,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       plainText: messageText,
       outgoingIndex: outgoingIndex,
       sendTargets: sendTargets,
-      groupWireId: widget.groupId,
+      groupWireId: widget.groupUuid,
     );
   }
 
@@ -926,7 +1020,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       plainText: messageText,
       outgoingIndex: index,
       sendTargets: sendTargets,
-      groupWireId: widget.groupId,
+      groupWireId: widget.groupUuid,
     );
   }
 
@@ -962,6 +1056,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (!mounted) return;
       setState(() {
         _messageUuidByIndex.clear();
+        _outgoingCreatedAtByIndex.clear();
         _messages
           ..clear()
           ..add(

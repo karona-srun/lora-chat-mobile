@@ -44,6 +44,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   Timer? _messagePollTimer;
   int _currentMessageLength = 0;
   String _lastRxText = '';
+  int? _lastRxReceivedCount;
+  int? _lastDbSyncedReceivedCount;
   String? _targetHex;
   String? _selfContactId;
   String? _targetContactId;
@@ -98,6 +100,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       final storedPowerMode = prefs.getString(_powerModePrefKey);
       final lastReceivedText =
           prefs.getString('message_last_received_text')?.trim() ?? '';
+      final lastReceivedCount = prefs.getInt('message_last_received_count');
 
       if (!mounted) return;
 
@@ -112,6 +115,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
           _powerMode = storedPowerMode;
         }
         _lastRxText = lastReceivedText;
+        _lastRxReceivedCount = lastReceivedCount;
         _currentMessageLength =
             _currentMessageLength.clamp(0, _maxMessageLength);
       });
@@ -417,6 +421,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     return false;
   }
 
+  bool _isGroupTrafficFrame(String payload) {
+    final text = payload.trim().toUpperCase();
+    if (text.isEmpty) return false;
+    return text.startsWith('GROUP_MSG|') ||
+        text.contains('|GROUP_MSG|') ||
+        text.contains('GROUP_INVITE|') ||
+        text.contains('GROUP_REMOVE|') ||
+        text.contains('GROUP_LEAVE|');
+  }
+
   Future<void> _appendIncomingDirectMessage({
     required String text,
     required String sender,
@@ -492,19 +506,38 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       final traffic = _trafficFromStatus(decoded);
 
       final lastRx = traffic['lastReceived']?.toString().trim() ?? '';
-      if (lastRx.isEmpty || lastRx == _lastRxText) return;
+      if (lastRx.isEmpty) return;
+      final currentReceivedCount = int.tryParse(
+        (traffic['received'] ?? '').toString(),
+      );
+      if (_saveDatabaseLocallyEnabled &&
+          currentReceivedCount != null &&
+          currentReceivedCount != _lastDbSyncedReceivedCount) {
+        _lastDbSyncedReceivedCount = currentReceivedCount;
+        await _loadDirectMessagesFromDb();
+      }
+      final isDuplicateByTextAndCount = lastRx == _lastRxText &&
+          currentReceivedCount != null &&
+          _lastRxReceivedCount != null &&
+          currentReceivedCount == _lastRxReceivedCount;
+      if (isDuplicateByTextAndCount) return;
 
       if (_isIgnoredStatusNoise(lastRx)) {
         _lastRxText = lastRx;
+        _lastRxReceivedCount = currentReceivedCount;
         return;
       }
 
       _lastRxText = lastRx;
+      _lastRxReceivedCount = currentReceivedCount;
+      if (_isGroupTrafficFrame(lastRx)) return;
 
       final tagged = _reFromTagged.firstMatch(lastRx);
       if (tagged != null) {
         var fromHex = (tagged.group(1) ?? '').toUpperCase();
-        final text = _sanitizeIncomingText(tagged.group(2) ?? '');
+        final taggedPayload = (tagged.group(2) ?? '').trim();
+        if (_isGroupTrafficFrame(taggedPayload)) return;
+        final text = _sanitizeIncomingText(taggedPayload);
         if (text.isEmpty) return;
         if (fromHex.length == 2) fromHex = '00$fromHex';
         if (fromHex.length == 4 && !_matchesTarget(fromHex)) return;
@@ -519,8 +552,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       // RELAY|DEST|…|payload — payload is the last group (after four metadata fields).
       final relay = _reRelayFull.firstMatch(lastRx);
       if (relay != null) {
+        final relayPayload = (relay.group(5) ?? '').trim();
+        if (_isGroupTrafficFrame(relayPayload)) return;
         final destHex = (relay.group(1) ?? '').toUpperCase();
-        final text = _sanitizeIncomingTextRelay(relay.group(5) ?? '');
+        final text = _sanitizeIncomingTextRelay(relayPayload);
         if (text.isEmpty) return;
         final target = _targetHex;
         if (target != null &&
@@ -538,11 +573,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       // MSG|SRC|DEST|payload
       final msgRelay = _reMsgPipe.firstMatch(lastRx);
       if (msgRelay != null) {
+        final msgPayload = (msgRelay.group(3) ?? '').trim();
+        if (_isGroupTrafficFrame(msgPayload)) return;
         final srcNorm =
             _normalizeNodeHex((msgRelay.group(1) ?? '').toUpperCase());
         final destNorm =
             _normalizeNodeHex((msgRelay.group(2) ?? '').toUpperCase());
-        final text = _sanitizeIncomingTextRelay(msgRelay.group(3) ?? '');
+        final text = _sanitizeIncomingTextRelay(msgPayload);
         if (text.isEmpty) return;
         final target = _targetHex;
         if (target != null &&

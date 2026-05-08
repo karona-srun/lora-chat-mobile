@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/local_database_service.dart';
 import '../l10n/app_localizations.dart';
+import 'groups_list_screen.dart';
 
 class GroupDetailsScreen extends StatefulWidget {
   const GroupDetailsScreen({super.key, required this.groupId});
@@ -577,7 +578,9 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       if (groupUuid == null || groupUuid.isEmpty) return;
       final selfMember = await _resolveSelfMember();
       if (selfMember == null) {
-        await LocalDatabaseService.instance.removeGroup(widget.groupId);
+        debugPrint('----------------- _leaveGroup ----------------------');
+        debugPrint('groupUuid: $groupUuid');
+        await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
         if (!mounted) return;
         // await _showMessageDialog(
         //   message: 'You have left the group.',
@@ -586,6 +589,10 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
         Navigator.of(context).pop(true);
         return;
       }
+
+      debugPrint('----------------- _leaveGroup ----------------------');
+      debugPrint('groupUuid: $groupUuid');
+      await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
 
       await LocalDatabaseService.instance.upsertGroupMember(
         GroupMemberRecord(
@@ -608,7 +615,9 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
           ) ??
           false;
       if (stillMember) {
-        await LocalDatabaseService.instance.removeGroup(widget.groupId);
+        debugPrint('----------------- _leaveGroup ----------------------');
+        debugPrint('groupUuid: $groupUuid');
+        await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
         if (!mounted) return;
         await _showMessageDialog(
           message: 'You have left the group.',
@@ -629,8 +638,21 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       Navigator.of(context).pop(true);
     } catch (_) {
       if (!mounted) return;
-      await _showMessageDialog(message: 'Failed to leave group');
-      
+      // await _showMessageDialog(message: 'Failed to leave group');
+
+      final groupUuid = _details?.groupUuid;
+      debugPrint('----------------- _leaveGroup ----------------------');
+      debugPrint('groupUuid: $groupUuid');
+      if (groupUuid != null && groupUuid.isNotEmpty) {
+        await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
+        // go back to groups list screen
+        Navigator.of(context).popUntil((route) => route.isFirst);
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => GroupsListScreen(),
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _updatingMembers = false);
@@ -684,7 +706,7 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       if (details != null) {
         await _broadcastGroupRemoval(details);
       }
-      await LocalDatabaseService.instance.removeGroup(widget.groupId);
+      await LocalDatabaseService.instance.removeGroup(details?.groupUuid ?? '');
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (_) {

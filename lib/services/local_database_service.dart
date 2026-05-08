@@ -468,14 +468,14 @@ CREATE TABLE messages (
     final existing = await db.query(
       'group_members',
       columns: ['id'],
-      where: 'group_uuid = ? AND contact_id = ?',
+      where: 'group_id = ? AND contact_id = ?',
       whereArgs: [groupId, member.contactId],
       limit: 1,
     );
 
     if (existing.isEmpty) {
       return db.insert('group_members', {
-        'group_uuid': normalizedGroupUuid,
+        'group_id': groupId,
         'contact_id': member.contactId,
         'role': member.role.name,
         'is_active': member.isActive ? 1 : 0,
@@ -490,6 +490,21 @@ CREATE TABLE messages (
       whereArgs: [id],
     );
     return id;
+  }
+
+  Future<int?> getGroupIdByUuid(String groupUuid) async {
+    final normalized = groupUuid.trim();
+    if (normalized.isEmpty) return null;
+    final db = await database;
+    final rows = await db.query(
+      'groups',
+      columns: ['id'],
+      where: 'group_uuid = ?',
+      whereArgs: [normalized],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['id'] as int?;
   }
 
   Future<List<ContactRecord>> listContacts() async {
@@ -612,9 +627,9 @@ ORDER BY
     );
   }
 
-  Future<void> removeGroup(int groupId) async {
+  Future<void> removeGroup(String groupUuid) async {
     final db = await database;
-    await db.delete('groups', where: 'id = ?', whereArgs: [groupId]);
+    await db.delete('groups', where: 'group_uuid = ?', whereArgs: [groupUuid]);
   }
 
   Future<void> removeGroupByUuid(String groupUuid) async {

@@ -28,6 +28,8 @@ class MessageBackgroundService {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
   static const String _notificationSoundEnabledPrefKey =
       'notification_sound_enabled';
+  static const String _lastReceivedTextPrefKey = 'message_last_received_text';
+  static const String _lastReceivedCountPrefKey = 'message_last_received_count';
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -114,12 +116,22 @@ class MessageBackgroundService {
       final traffic = _trafficFromStatus(decodedRaw);
       final lastRx = traffic['lastReceived']?.toString().trim() ?? '';
       if (lastRx.isEmpty) return;
+      final currentReceivedCount = int.tryParse(
+        (traffic['received'] ?? '').toString(),
+      );
 
-      final previousLastRx =
-          prefs.getString('message_last_received_text')?.trim() ?? '';
-      if (previousLastRx == lastRx) return;
+      final previousLastRx = prefs.getString(_lastReceivedTextPrefKey)?.trim() ?? '';
+      final previousReceivedCount = prefs.getInt(_lastReceivedCountPrefKey);
+      final isDuplicateByTextAndCount = previousLastRx == lastRx &&
+          currentReceivedCount != null &&
+          previousReceivedCount != null &&
+          currentReceivedCount == previousReceivedCount;
+      if (isDuplicateByTextAndCount) return;
 
-      await prefs.setString('message_last_received_text', lastRx);
+      await prefs.setString(_lastReceivedTextPrefKey, lastRx);
+      if (currentReceivedCount != null) {
+        await prefs.setInt(_lastReceivedCountPrefKey, currentReceivedCount);
+      }
 
       if (lastRx.startsWith('GROUP_INVITE|')) {
         await _handleGroupInvite(lastRx);
@@ -168,7 +180,9 @@ class MessageBackgroundService {
   }
 
   static Future<void> _handleGroupInvite(String raw) async {
-    final parts = raw.split('|');
+    final normalizedRaw = _extractControlPayload(raw, 'GROUP_INVITE');
+    if (normalizedRaw == null) return;
+    final parts = normalizedRaw.split('|');
     if (parts.length < 4) return;
 
     final groupUuid = parts[1].trim();
@@ -247,7 +261,9 @@ class MessageBackgroundService {
   }
 
   static Future<void> _handleGroupRemove(String raw) async {
-    final parts = raw.split('|');
+    final normalizedRaw = _extractControlPayload(raw, 'GROUP_REMOVE');
+    if (normalizedRaw == null) return;
+    final parts = normalizedRaw.split('|');
     if (parts.length < 2) return;
     final groupUuid = parts[1].trim();
     if (groupUuid.isEmpty) return;
@@ -258,7 +274,9 @@ class MessageBackgroundService {
 
   static Future<void> _handleGroupLeave(String raw) async {
     // Format: GROUP_LEAVE|<groupUuid>|<contactId>
-    final parts = raw.split('|');
+    final normalizedRaw = _extractControlPayload(raw, 'GROUP_LEAVE');
+    if (normalizedRaw == null) return;
+    final parts = normalizedRaw.split('|');
     if (parts.length < 3) return;
     final groupUuid = parts[1].trim();
     final contactIdStr = parts[2].trim();
@@ -288,10 +306,25 @@ class MessageBackgroundService {
     ).firstMatch(message);
     if (tagged != null) {
       var fromHex = (tagged.group(1) ?? '').toUpperCase();
-      final text = (tagged.group(2) ?? '').trim();
-      if (text.isEmpty) return null;
+      final taggedPayload = (tagged.group(2) ?? '').trim();
+      if (taggedPayload.isEmpty) return null;
       if (fromHex.length == 2) fromHex = '00$fromHex';
-      return _IncomingMessage(sender: 'Node 0x$fromHex', text: text);
+
+      // Handles: From 0x0001: 0001|0003|GROUP_MSG|grp3_...|LM-1&0001: hello
+      final embeddedGroup = _parsePipeGroupMessage(taggedPayload);
+      if (embeddedGroup != null) {
+        return _IncomingMessage(
+          sender: embeddedGroup.senderName,
+          text: embeddedGroup.text,
+        );
+      }
+
+      final parsedTagged = _splitSenderFromPayload(taggedPayload);
+      if (parsedTagged.text.isEmpty) return null;
+      return _IncomingMessage(
+        sender: parsedTagged.senderName ?? 'Node 0x$fromHex',
+        text: parsedTagged.text,
+      );
     }
 
     final relay = RegExp(
@@ -299,80 +332,44 @@ class MessageBackgroundService {
       caseSensitive: false,
     ).firstMatch(message);
     if (relay != null) {
-      final text = (relay.group(2) ?? '').trim();
-      if (text.isEmpty) return null;
-      // return _IncomingMessage(sender: 'Via relay -> 0x$destHex', text: text);
-      return _IncomingMessage(sender: 'New message', text: text);
-    }
-    if (message.contains('GROUP_INVITE|') || message.contains('GROUP_INVITEI')) {
-      // create group is auto when got group invite into database
-      await LocalDatabaseService.instance.ensureInitialized();
+      final relayPayload = (relay.group(2) ?? '').trim();
+      if (relayPayload.isEmpty) return null;
 
-      final groupUuid = message.split('|')[3];
-      final groupName = message.split('|')[4];
-      final ownerAddrRaw = message.split('|')[5];
-      final members = message.split('|')[6];
-      final ownerAddr = _normalizeAddress(ownerAddrRaw);
-      final ownerContactId = await LocalDatabaseService.instance.upsertContact(
-        ContactRecord(
-          loraAddress: ownerAddr.isNotEmpty ? ownerAddr : ownerAddrRaw.trim(),
-          displayName: ownerAddr.isNotEmpty ? ownerAddr : ownerAddrRaw.trim(),
-        ),
-      );
-      // `members` is CSV like: LM-1:0001,LM-2:0002,LM-3:0003 — resolve to contact row ids.
-      final resolvedMemberContactIds = <String>[];
-      for (final raw in members.split(',')) {
-        final token = raw.trim();
-        if (token.isEmpty) continue;
-        final addrPart = token.contains(':')
-            ? token.split(':').last.trim()
-            : token.contains('&')
-                ? token.split('&').last.trim()
-                : token;
-        final namePart = token.contains(':')
-            ? token.split(':').first.trim()
-            : token.contains('&')
-                ? token.split('&').first.trim()
-                : '';
-        final addr = _normalizeAddress(addrPart);
-        if (addr.isEmpty) continue;
-        final id = await LocalDatabaseService.instance.upsertContact(
-          ContactRecord(
-            loraAddress: addr,
-            displayName: namePart.isNotEmpty ? namePart : '0x$addr',
-          ),
+      final relayGroup = _parsePipeGroupMessage(relayPayload);
+      if (relayGroup != null) {
+        return _IncomingMessage(
+          sender: relayGroup.senderName,
+          text: relayGroup.text,
         );
-        resolvedMemberContactIds.add(id.toString());
       }
 
-      final groupId = await LocalDatabaseService.instance.createGroupWithMembers(
-        groupName: groupName,
-        groupUuid: groupUuid,
-        ownerContactId: ownerContactId,
-        memberContactIds: resolvedMemberContactIds,
+      final parsedRelay = _splitSenderFromPayload(relayPayload);
+      if (parsedRelay.text.isEmpty) return null;
+      return _IncomingMessage(
+        sender: parsedRelay.senderName ?? 'New message',
+        text: parsedRelay.text,
       );
+    }
 
-      debugPrint('Group created: $groupId');
-      debugPrint('Group name: $groupName');
-      debugPrint('Group UUID: $groupUuid');
-      debugPrint('Owner contact ID: $ownerContactId');
-      debugPrint('Members: $members');
-      debugPrint('Member contact IDs: ${resolvedMemberContactIds.join(', ')}');
-      return _IncomingMessage(sender: 'New group invite', text: message.trim());
+    final pipeGroup = _parsePipeGroupMessage(message);
+    if (pipeGroup != null) {
+      return _IncomingMessage(sender: pipeGroup.senderName, text: pipeGroup.text);
     }
-    if (message.contains('GROUP_REMOVE|')) {
-      return _IncomingMessage(sender: 'New group remove', text: message.trim());
+
+    final pipeDirect = _parsePipeDirectMessage(message);
+    if (pipeDirect != null) {
+      return _IncomingMessage(
+        sender: 'Node 0x${pipeDirect.fromAddr}',
+        text: pipeDirect.text,
+      );
     }
-    if (message.contains('GROUP_LEAVE|')) {
-      return _IncomingMessage(sender: 'New group leave', text: message.trim());
-    }
-    final msg = message.split('|');
-    final text = msg[2];
-    if(message.contains('GROUP_MSG')){
-      return _IncomingMessage(sender: "Group message", text: msg[4].trimLeft());
-    }else{
-      return _IncomingMessage(sender: "Direct message", text: text.trimLeft());
-    }
+
+    final plain = _splitSenderFromPayload(message);
+    if (plain.text.isEmpty) return null;
+    return _IncomingMessage(
+      sender: plain.senderName ?? 'New message',
+      text: plain.text,
+    );
   }
 
   static String _newMessageUuid(String prefix) {
@@ -420,6 +417,49 @@ class MessageBackgroundService {
     return (fromAddr: fromAddr, toAddr: toAddr, text: text);
   }
 
+  static ({String fromAddr, int groupId, String senderName, String senderAddr, String text})?
+      _parsePipeGroupMessage(String raw) {
+    final parts = raw.split('|').map((e) => e.trim()).toList();
+    // Supported group formats:
+    // 1) <from>|<to>|GROUP_MSG|<groupToken>|<senderName>&<senderAddr>: <text>
+    // 2) GROUP_MSG|<groupToken>|<senderName>&<senderAddr>: <text>
+    String fromAddr = '';
+    String groupToken = '';
+    String payload = '';
+
+    if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
+      fromAddr = _normalizeAddress(parts[0]);
+      if (fromAddr.isEmpty) return null;
+      groupToken = parts[3];
+      payload = parts.sublist(4).join('|').trim();
+    } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
+      // No explicit `from` address embedded; leave it empty and rely on senderAddr.
+      groupToken = parts[1];
+      payload = parts.sublist(2).join('|').trim();
+    } else {
+      return null;
+    }
+
+    if (groupToken.trim().isEmpty) return null;
+    if (payload.isEmpty) return null;
+
+    final senderMatch = RegExp(r'^([^&:|]+)&([0-9A-Fa-f]{2,8})\s*:\s*(.+)$').firstMatch(payload);
+    if (senderMatch == null) return null;
+
+    final senderName = (senderMatch.group(1) ?? '').trim();
+    final senderAddr = _normalizeAddress(senderMatch.group(2) ?? '');
+    final text = _sanitizeIncomingText(senderMatch.group(3) ?? '');
+    if (senderName.isEmpty || senderAddr.isEmpty || text.isEmpty) return null;
+
+    return (
+      fromAddr: fromAddr,
+      groupId: -1,
+      senderName: senderName,
+      senderAddr: senderAddr,
+      text: text,
+    );
+  }
+
   static Future<int> _ensureSelfContact() async {
     final prefs = await SharedPreferences.getInstance();
     final myCallSign = (prefs.getString('callSign') ?? '').trim();
@@ -448,6 +488,57 @@ class MessageBackgroundService {
 
     await LocalDatabaseService.instance.ensureInitialized();
     final selfContactId = await _ensureSelfContact();
+
+    final pipeGroup = _parsePipeGroupMessage(raw);
+    if (pipeGroup != null) {
+      // Group wire payload uses a group token (usually group UUID). Persist using the DB group id.
+      final parts = raw.split('|').map((e) => e.trim()).toList();
+      String? groupToken;
+      if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
+        groupToken = parts[3];
+      } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
+        groupToken = parts[1];
+      }
+      final groupUuid = (groupToken ?? '').trim();
+      final groupDbId = groupUuid.isEmpty
+          ? null
+          : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
+      if (groupDbId == null) {
+        // If group isn't known locally yet (no invite processed), skip persisting
+        // to avoid orphan messages that the UI can't query.
+        return;
+      }
+      final fromContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: pipeGroup.senderAddr,
+          displayName: pipeGroup.senderName,
+        ),
+      );
+      final isDuplicate =
+          await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+        chatType: ChatType.group,
+        fromContactId: fromContactId,
+        groupId: groupDbId,
+        payload: pipeGroup.text,
+      );
+      if (!isDuplicate) {
+        await LocalDatabaseService.instance.insertMessage(
+          MessageRecord(
+            messageUuid: _newMessageUuid('grp_$groupDbId'),
+            chatType: ChatType.group,
+            fromContactId: fromContactId.toString(),
+            groupId: groupDbId.toString(),
+            payload: pipeGroup.text,
+            deliveryStatus: DeliveryStatus.delivered,
+            receivedAt: DateTime.now().toUtc().toIso8601String(),
+          ),
+        );
+      }
+      debugPrint(
+        'Group message is saved to database (groupId=$groupDbId, from=${pipeGroup.senderAddr})',
+      );
+      return;
+    }
 
     final pipeDirect = _parsePipeDirectMessage(raw);
     if (pipeDirect != null) {
@@ -490,8 +581,61 @@ class MessageBackgroundService {
           ),
         );
       }
-      debugPrint('Message is saved to database');
+      debugPrint('Direct message is saved to database');
       return;
+    }
+
+    final relay = RegExp(
+      r'^RELAY\|([0-9A-Fa-f]{4})\|(.+)$',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    if (relay != null) {
+      final relayPayload = (relay.group(2) ?? '').trim();
+      if (relayPayload.isNotEmpty) {
+        final relayGroup = _parsePipeGroupMessage(relayPayload);
+        if (relayGroup != null) {
+          final parts = relayPayload.split('|').map((e) => e.trim()).toList();
+          String? groupToken;
+          if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
+            groupToken = parts[3];
+          } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
+            groupToken = parts[1];
+          }
+          final groupUuid = (groupToken ?? '').trim();
+          final groupDbId = groupUuid.isEmpty
+              ? null
+              : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
+          if (groupDbId == null) return;
+          final fromContactId =
+              await LocalDatabaseService.instance.upsertContact(
+            ContactRecord(
+              loraAddress: relayGroup.senderAddr,
+              displayName: relayGroup.senderName,
+            ),
+          );
+          final isDuplicate = await LocalDatabaseService.instance
+              .hasRecentDuplicateIncomingMessage(
+            chatType: ChatType.group,
+            fromContactId: fromContactId,
+            groupId: groupDbId,
+            payload: relayGroup.text,
+          );
+          if (!isDuplicate) {
+            await LocalDatabaseService.instance.insertMessage(
+              MessageRecord(
+                messageUuid: _newMessageUuid('grp_$groupDbId'),
+                chatType: ChatType.group,
+                fromContactId: fromContactId.toString(),
+                groupId: groupDbId.toString(),
+                payload: relayGroup.text,
+                deliveryStatus: DeliveryStatus.delivered,
+                receivedAt: DateTime.now().toUtc().toIso8601String(),
+              ),
+            );
+          }
+          return;
+        }
+      }
     }
 
     final fromTagged = RegExp(
@@ -500,44 +644,66 @@ class MessageBackgroundService {
     ).firstMatch(raw);
     if (fromTagged != null) {
       final fromAddr = _normalizeAddress(fromTagged.group(1) ?? '');
-      final parsed = _splitSenderFromPayload(fromTagged.group(2) ?? '');
-      if (fromAddr.isEmpty || parsed.text.isEmpty) return;
+      final taggedPayload = (fromTagged.group(2) ?? '').trim();
+      if (fromAddr.isEmpty || taggedPayload.isEmpty) return;
+      if (_isGroupTrafficFrame(taggedPayload)) {
+        // Avoid routing group/control frames into direct chats when group parser
+        // cannot fully parse a firmware variant.
+        return;
+      }
 
+      // Handles: From 0x0001: 0001|0003|GROUP_MSG|grp3_...|LM-1&0001: hello
+      final embeddedPipeGroup = _parsePipeGroupMessage(taggedPayload);
+      if (embeddedPipeGroup != null) {
+        final parts = taggedPayload.split('|').map((e) => e.trim()).toList();
+        String? groupToken;
+        if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
+          groupToken = parts[3];
+        } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
+          groupToken = parts[1];
+        }
+        final groupUuid = (groupToken ?? '').trim();
+        final groupDbId = groupUuid.isEmpty
+            ? null
+            : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
+        if (groupDbId == null) return;
+        final fromContactId = await LocalDatabaseService.instance.upsertContact(
+          ContactRecord(
+            loraAddress: embeddedPipeGroup.senderAddr,
+            displayName: embeddedPipeGroup.senderName,
+          ),
+        );
+        final isDuplicate =
+            await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+          chatType: ChatType.group,
+          fromContactId: fromContactId,
+          groupId: groupDbId,
+          payload: embeddedPipeGroup.text,
+        );
+        if (!isDuplicate) {
+          await LocalDatabaseService.instance.insertMessage(
+            MessageRecord(
+              messageUuid: _newMessageUuid('grp_$groupDbId'),
+              chatType: ChatType.group,
+              fromContactId: fromContactId.toString(),
+              groupId: groupDbId.toString(),
+              payload: embeddedPipeGroup.text,
+              deliveryStatus: DeliveryStatus.delivered,
+              receivedAt: DateTime.now().toUtc().toIso8601String(),
+            ),
+          );
+        }
+        return;
+      }
+
+      final parsed = _splitSenderFromPayload(taggedPayload);
+      if (parsed.text.isEmpty) return;
       final fromContactId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
           loraAddress: fromAddr,
           displayName: parsed.senderName ?? 'Node 0x$fromAddr',
         ),
       );
-
-
-
-      debugPrint('Persist Incoming Message : $raw');
-      final msg = raw.split('|');
-      final fromId = msg[1];
-      final toId = msg[2];
-      final text = msg[3];
-    // debugPrint('fromContactId: $fromContactId');
-    // debugPrint('toContactId: $toContactId');
-    // debugPrint('text: $text');
-
-    final messageUuid = await LocalDatabaseService.instance.insertMessage(
-      MessageRecord(
-        messageUuid: _newMessageUuid('dm'),
-        chatType: ChatType.direct,
-        fromContactId: fromId.toString(),
-        toContactId: toId.toString(),
-        payload: text.toString(),
-        deliveryStatus: DeliveryStatus.delivered,
-        receivedAt: DateTime.now().toUtc().toIso8601String(),
-      ),
-    );
-
-    if (messageUuid != null){
-      debugPrint('Message is saved to database');
-      debugPrint('messageUuid: $messageUuid');
-    }
-
       await LocalDatabaseService.instance.insertMessage(
         MessageRecord(
           messageUuid: _newMessageUuid('dm'),
@@ -613,6 +779,36 @@ class MessageBackgroundService {
       return true;
     }
     return false;
+  }
+
+  static bool _isGroupTrafficFrame(String payload) {
+    final text = payload.trim().toUpperCase();
+    if (text.isEmpty) return false;
+    return text.startsWith('GROUP_MSG|') ||
+        text.contains('|GROUP_MSG|') ||
+        text.contains('GROUP_INVITE|') ||
+        text.contains('GROUP_REMOVE|') ||
+        text.contains('GROUP_LEAVE|');
+  }
+
+  static String? _extractControlPayload(String raw, String controlType) {
+    final marker = '$controlType|';
+    final directIndex = raw.indexOf(marker);
+    if (directIndex >= 0) {
+      return raw.substring(directIndex).trim();
+    }
+
+    // Also support tagged transport frames:
+    // "From 0x0003: 0003|0002|GROUP_INVITE|..."
+    final taggedMatch = RegExp(
+      r'^From 0x[0-9A-Fa-f]{2,4}\s*:\s*(.+)$',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    final taggedPayload = taggedMatch?.group(1)?.trim();
+    if (taggedPayload == null || taggedPayload.isEmpty) return null;
+    final taggedIndex = taggedPayload.indexOf(marker);
+    if (taggedIndex < 0) return null;
+    return taggedPayload.substring(taggedIndex).trim();
   }
 
   static Future<void> _showNotification({

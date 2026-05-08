@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 import 'create_group_screen.dart';
 import 'group_chat_screen.dart';
 import 'group_details_screen.dart';
@@ -12,29 +13,79 @@ class GroupsListScreen extends StatefulWidget {
   State<GroupsListScreen> createState() => _GroupsListScreenState();
 }
 
-class _GroupsListScreenState extends State<GroupsListScreen> {
+class _GroupsListScreenState extends State<GroupsListScreen>
+    with WidgetsBindingObserver {
   late Future<List<GroupSummaryRecord>> _groupsFuture;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
   bool _hasScrolled = false;
+  Timer? _groupsSyncTimer;
+  String _groupsFingerprint = '';
+  bool _refreshInFlight = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _groupsFuture = LocalDatabaseService.instance.listGroups();
     _reloadGroups();
+    _groupsSyncTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_refreshGroupsIfChanged()),
+    );
   }
 
   Future<void> _reloadGroups() async {
-    setState(() {
-      _groupsFuture = LocalDatabaseService.instance.listGroups();
-    });
-    await _groupsFuture;
+    try {
+      final groups = await LocalDatabaseService.instance.listGroups();
+      _groupsFingerprint = _fingerprintForGroups(groups);
+      debugPrint('----------------- _reloadGroups Groups: ----------------------');
+      debugPrint(
+        '${groups.map((g) => '[id=${g.groupId}, uuid=${g.groupUuid}, name=${g.groupName}, members=${g.memberCount}]').join('\n')}',
+      );
+      
+      if (!mounted) return;
+      setState(() {
+        _groupsFuture = Future.value(groups);
+      });
+    } catch (e) {
+      debugPrint('Failed to reload groups: $e');
+    }
+  }
+
+  String _fingerprintForGroups(List<GroupSummaryRecord> groups) {
+    return groups
+        .map(
+          (g) =>
+              '${g.groupId}|${g.groupUuid}|${g.groupName}|${g.memberCount}|${g.updatedAt}',
+        )
+        .join('||');
+  }
+
+  Future<void> _refreshGroupsIfChanged() async {
+    if (_refreshInFlight) return;
+    _refreshInFlight = true;
+    try {
+      final groups = await LocalDatabaseService.instance.listGroups();
+      final nextFingerprint = _fingerprintForGroups(groups);
+      if (nextFingerprint == _groupsFingerprint) return;
+      _groupsFingerprint = nextFingerprint;
+      if (!mounted) return;
+      setState(() {
+        debugPrint('----------------- _refreshGroupsIfChanged ----------------------');
+        debugPrint('groups: $groups');
+        _groupsFuture = Future.value(groups);
+      });
+    } catch (e) {
+      debugPrint('Failed to refresh groups: $e');
+    } finally {
+      _refreshInFlight = false;
+    }
   }
 
   Future<void> _openCreateGroupScreen() async {
     final result = await Navigator.of(context).push<CreatedGroupPayload>(
-      MaterialPageRoute(
+      MaterialPageRoute(settings: const RouteSettings(name: 'create_group'),
         builder: (_) => const CreateGroupScreen(),
       ),
     );
@@ -42,7 +93,7 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
     await _reloadGroups();
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      MaterialPageRoute(settings: const RouteSettings(name: 'group_chat'),
         builder: (_) => GroupChatScreen(
           key: ValueKey<int>(result.groupId),
           groupId: result.groupId,
@@ -57,7 +108,7 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
 
   Future<void> _openGroupDetails(GroupSummaryRecord group) async {
     final removed = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
+      MaterialPageRoute(settings: const RouteSettings(name: 'group_details'),                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
         builder: (_) => GroupDetailsScreen(groupId: group.groupId),
       ),
     );
@@ -69,8 +120,16 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _groupsSyncTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    unawaited(_refreshGroupsIfChanged());
   }
 
   @override
@@ -232,8 +291,8 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
                             icon: const Icon(Icons.info_outline, size: 20),
                             onPressed: () => _openGroupDetails(group),
                           ),
-                          onTap: () {
-                            Navigator.of(context).push(
+                          onTap: () async {
+                            await Navigator.of(context).push(
                               MaterialPageRoute(
                                 builder: (_) => GroupChatScreen(
                                   key: ValueKey<int>(group.groupId),
@@ -243,6 +302,8 @@ class _GroupsListScreenState extends State<GroupsListScreen> {
                                 ),
                               ),
                             );
+                            if (!mounted) return;
+                            await _reloadGroups();
                           },
                         );
                       },

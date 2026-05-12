@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'create_group_screen.dart';
 import 'group_chat_screen.dart';
 import 'group_details_screen.dart';
 import '../l10n/app_localizations.dart';
 import '../services/local_database_service.dart';
+import '../services/chat_unread_dot_service.dart';
 
 class GroupsListScreen extends StatefulWidget {
   const GroupsListScreen({super.key});
@@ -15,6 +17,7 @@ class GroupsListScreen extends StatefulWidget {
 
 class _GroupsListScreenState extends State<GroupsListScreen>
     with WidgetsBindingObserver {
+  static const String _groupsChangedAtPrefKey = 'groups_changed_at_ms';
   late Future<List<GroupSummaryRecord>> _groupsFuture;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
@@ -22,6 +25,9 @@ class _GroupsListScreenState extends State<GroupsListScreen>
   Timer? _groupsSyncTimer;
   String _groupsFingerprint = '';
   bool _refreshInFlight = false;
+  int _lastObservedGroupsChangedAt = 0;
+  Set<String> _unreadGroupUuids = <String>{};
+  Timer? _unreadPollTimer;
 
   @override
   void initState() {
@@ -33,6 +39,24 @@ class _GroupsListScreenState extends State<GroupsListScreen>
       const Duration(seconds: 2),
       (_) => unawaited(_refreshGroupsIfChanged()),
     );
+    unawaited(_syncUnreadGroupDots());
+    _unreadPollTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_syncUnreadGroupDots()),
+    );
+  }
+
+  Future<void> _syncUnreadGroupDots() async {
+    try {
+      final next = await ChatUnreadDotService.groupUnreadSet();
+      if (!mounted) return;
+      final same = next.length == _unreadGroupUuids.length &&
+          next.every(_unreadGroupUuids.contains);
+      if (same) return;
+      setState(() => _unreadGroupUuids = next);
+    } catch (_) {
+      // Best effort.
+    }
   }
 
   Future<void> _reloadGroups() async {
@@ -66,6 +90,14 @@ class _GroupsListScreenState extends State<GroupsListScreen>
     if (_refreshInFlight) return;
     _refreshInFlight = true;
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final changedAt = prefs.getInt(_groupsChangedAtPrefKey) ?? 0;
+      if (changedAt > _lastObservedGroupsChangedAt) {
+        _lastObservedGroupsChangedAt = changedAt;
+        await _reloadGroups();
+        return;
+      }
+
       final groups = await LocalDatabaseService.instance.listGroups();
       final nextFingerprint = _fingerprintForGroups(groups);
       if (nextFingerprint == _groupsFingerprint) return;
@@ -122,6 +154,7 @@ class _GroupsListScreenState extends State<GroupsListScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _groupsSyncTimer?.cancel();
+    _unreadPollTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -260,21 +293,49 @@ class _GroupsListScreenState extends State<GroupsListScreen>
                             horizontal: 8,
                             vertical: 6,
                           ),
-                          leading: Container(
-                            width: 40,
-                            height: 40,
-                            decoration: BoxDecoration(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .primary
-                                  .withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Icon(
-                              Icons.group,
-                              color: Theme.of(context).colorScheme.primary,
-                              size: 28,
-                            ),
+                          leading: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Icon(
+                                  Icons.group,
+                                  color: Theme.of(context).colorScheme.primary,
+                                  size: 28,
+                                ),
+                              ),
+                              if (_unreadGroupUuids.contains(
+                                group.groupUuid.trim(),
+                              ))
+                                Positioned(
+                                  right: -2,
+                                  top: -2,
+                                  child: Container(
+                                    width: 12,
+                                    height: 12,
+                                    decoration: BoxDecoration(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .error,
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .surface,
+                                        width: 2,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                           title: Text(
                             name,

@@ -9,6 +9,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../utils/json_string_sanitize.dart';
 import '../services/local_database_service.dart';
+import 'chat_unread_dot_service.dart';
 
 const String _backgroundTaskName = 'lomhor.message.background.poll';
 const String _backgroundTaskUniqueName = 'lomhor.message.background.unique';
@@ -30,6 +31,7 @@ class MessageBackgroundService {
       'notification_sound_enabled';
   static const String _lastReceivedTextPrefKey = 'message_last_received_text';
   static const String _lastReceivedCountPrefKey = 'message_last_received_count';
+  static const String _groupsChangedAtPrefKey = 'groups_changed_at_ms';
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -133,20 +135,25 @@ class MessageBackgroundService {
         await prefs.setInt(_lastReceivedCountPrefKey, currentReceivedCount);
       }
 
-      if (lastRx.startsWith('GROUP_INVITE|')) {
+      if (_containsControlFrame(lastRx, 'GROUP_INVITE')) {
         await _handleGroupInvite(lastRx);
       }
-      if (lastRx.startsWith('GROUP_REMOVE|')) {
+      if (_containsControlFrame(lastRx, 'GROUP_REMOVE')) {
         await _handleGroupRemove(lastRx);
       }
-      if (lastRx.startsWith('GROUP_LEAVE|')) {
+      if (_containsControlFrame(lastRx, 'GROUP_LEAVE')) {
         await _handleGroupLeave(lastRx);
+      }
+      if (_containsControlFrame(lastRx, 'GROUP_MEMBER_REMOVE')) {
+        await _handleGroupMemberRemove(lastRx);
       }
 
       await _persistIncomingMessage(lastRx);
 
       final incoming = await _parseIncomingMessage(lastRx);
       if (incoming == null) return;
+
+      await _markUnreadDotsFromFrame(lastRx);
 
       // debugPrint('incoming: ${incoming.sender} ${incoming.text}');    
 
@@ -258,6 +265,7 @@ class MessageBackgroundService {
         ),
       );
     }
+    await _markGroupsChanged();
   }
 
   static Future<void> _handleGroupRemove(String raw) async {
@@ -267,9 +275,11 @@ class MessageBackgroundService {
     if (parts.length < 2) return;
     final groupUuid = parts[1].trim();
     if (groupUuid.isEmpty) return;
-
+    debugPrint('----------------- _handleGroupRemove ----------------------');
+    debugPrint('groupUuid: $groupUuid');
     await LocalDatabaseService.instance.ensureInitialized();
     await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
+    await _markGroupsChanged();
   }
 
   static Future<void> _handleGroupLeave(String raw) async {
@@ -289,13 +299,34 @@ class MessageBackgroundService {
       groupUuid: groupUuid,
       contactId: contactId,
     );
+    await _markGroupsChanged();
+  }
+
+  /// Wire format: `GROUP_MEMBER_REMOVE`, group UUID, numeric contact id (pipe-separated).
+  /// Owner removed another member; all devices should drop that member locally.
+  static Future<void> _handleGroupMemberRemove(String raw) async {
+    final normalizedRaw = _extractControlPayload(raw, 'GROUP_MEMBER_REMOVE');
+    if (normalizedRaw == null) return;
+    final parts = normalizedRaw.split('|');
+    if (parts.length < 3) return;
+    final groupUuid = parts[1].trim();
+    final contactId = int.tryParse(parts[2].trim());
+    if (groupUuid.isEmpty || contactId == null) return;
+
+    await LocalDatabaseService.instance.ensureInitialized();
+    await LocalDatabaseService.instance.deactivateGroupMemberByUuid(
+      groupUuid: groupUuid,
+      contactId: contactId,
+    );
+    await _markGroupsChanged();
   }
 
   static Future<_IncomingMessage?> _parseIncomingMessage(String message) async {
     if (message.startsWith('HELLO|')) return null;
-    if (message.startsWith('GROUP_INVITE|')) return null;
-    if (message.startsWith('GROUP_REMOVE|')) return null;
-    if (message.startsWith('GROUP_LEAVE|')) return null;
+    if (_containsControlFrame(message, 'GROUP_INVITE')) return null;
+    if (_containsControlFrame(message, 'GROUP_REMOVE')) return null;
+    if (_containsControlFrame(message, 'GROUP_LEAVE')) return null;
+    if (_containsControlFrame(message, 'GROUP_MEMBER_REMOVE')) return null;
     if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(message)) {
       return null;
     }
@@ -460,6 +491,90 @@ class MessageBackgroundService {
     );
   }
 
+  static String? _groupTokenFromWire(String raw) {
+    final parts = raw.split('|').map((e) => e.trim()).toList();
+    if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
+      final t = parts[3].trim();
+      return t.isEmpty ? null : t;
+    }
+    if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
+      final t = parts[1].trim();
+      return t.isEmpty ? null : t;
+    }
+    return null;
+  }
+
+  /// Updates list-row unread dots for the contact / group that sent this frame.
+  static Future<void> _markUnreadDotsFromFrame(String lastRx) async {
+    if (_isIgnoredStatusNoise(lastRx)) return;
+    if (_containsControlFrame(lastRx, 'GROUP_INVITE')) return;
+    if (_containsControlFrame(lastRx, 'GROUP_REMOVE')) return;
+    if (_containsControlFrame(lastRx, 'GROUP_LEAVE')) return;
+    if (_containsControlFrame(lastRx, 'GROUP_MEMBER_REMOVE')) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final myAddr = _normalizeAddress(
+      (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
+    );
+
+    String? taggedInner;
+    String? taggedFromHex;
+    final tagged = RegExp(
+      r'^From 0x([0-9A-Fa-f]{2,4})\s*:\s*(.+)$',
+      caseSensitive: false,
+    ).firstMatch(lastRx);
+    if (tagged != null) {
+      taggedInner = tagged.group(2)?.trim();
+      var fh = (tagged.group(1) ?? '').toUpperCase();
+      if (fh.length == 2) fh = '00$fh';
+      taggedFromHex = _normalizeAddress(fh);
+    }
+
+    String? relayInner;
+    final relay = RegExp(
+      r'^RELAY\|([0-9A-Fa-f]{4})\|(.+)$',
+      caseSensitive: false,
+    ).firstMatch(lastRx);
+    if (relay != null) {
+      relayInner = relay.group(2)?.trim();
+    }
+
+    final blobs = <String>[
+      lastRx,
+      if (taggedInner != null && taggedInner.isNotEmpty) taggedInner,
+      if (relayInner != null && relayInner.isNotEmpty) relayInner,
+    ];
+
+    for (final blob in blobs) {
+      final g = _parsePipeGroupMessage(blob);
+      if (g != null) {
+        final uuid = _groupTokenFromWire(blob);
+        if (uuid != null &&
+            uuid.isNotEmpty &&
+            (myAddr.isEmpty || g.senderAddr != myAddr)) {
+          await ChatUnreadDotService.markGroupUnread(uuid);
+        }
+        return;
+      }
+    }
+
+    for (final blob in blobs) {
+      final d = _parsePipeDirectMessage(blob);
+      if (d != null) {
+        if (myAddr.isEmpty || d.fromAddr != myAddr) {
+          await ChatUnreadDotService.markDirectUnread(d.fromAddr);
+        }
+        return;
+      }
+    }
+
+    if (taggedFromHex != null &&
+        taggedFromHex.isNotEmpty &&
+        (myAddr.isEmpty || taggedFromHex != myAddr)) {
+      await ChatUnreadDotService.markDirectUnread(taggedFromHex);
+    }
+  }
+
   static Future<int> _ensureSelfContact() async {
     final prefs = await SharedPreferences.getInstance();
     final myCallSign = (prefs.getString('callSign') ?? '').trim();
@@ -480,9 +595,13 @@ class MessageBackgroundService {
     // Respect setting: only persist incoming messages when local DB saving is enabled.
     if (!saveDbEnabled) return;
     if (_isIgnoredStatusNoise(raw)) return;
-    if (raw.contains('GROUP_INVITE|') || raw.contains('GROUP_INVITET|')) {
+    if (_containsControlFrame(raw, 'GROUP_INVITE')) {
       // Auto-create/update group and members from invite payload.
       await _handleGroupInvite(raw);
+      return;
+    }
+    if (_containsControlFrame(raw, 'GROUP_MEMBER_REMOVE')) {
+      await _handleGroupMemberRemove(raw);
       return;
     }
 
@@ -788,7 +907,8 @@ class MessageBackgroundService {
         text.contains('|GROUP_MSG|') ||
         text.contains('GROUP_INVITE|') ||
         text.contains('GROUP_REMOVE|') ||
-        text.contains('GROUP_LEAVE|');
+        text.contains('GROUP_LEAVE|') ||
+        text.contains('GROUP_MEMBER_REMOVE|');
   }
 
   static String? _extractControlPayload(String raw, String controlType) {
@@ -809,6 +929,18 @@ class MessageBackgroundService {
     final taggedIndex = taggedPayload.indexOf(marker);
     if (taggedIndex < 0) return null;
     return taggedPayload.substring(taggedIndex).trim();
+  }
+
+  static bool _containsControlFrame(String raw, String controlType) {
+    return _extractControlPayload(raw, controlType) != null;
+  }
+
+  static Future<void> _markGroupsChanged() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+      _groupsChangedAtPrefKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
   }
 
   static Future<void> _showNotification({

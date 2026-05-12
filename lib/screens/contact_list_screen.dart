@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -5,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'chat_detail_screen.dart';
 import '../l10n/app_localizations.dart';
 import '../services/local_database_service.dart';
+import '../services/chat_unread_dot_service.dart';
 import '../utils/json_string_sanitize.dart';
 
 /// Normalizes API `addr` (hex string or integer) to uppercase hex without 0x prefix.
@@ -44,6 +46,8 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
   String _searchQuery = '';
   final Set<String> _removedAddrs = <String>{};
   String? _selfContactId = "";
+  Set<String> _unreadDirectAddrs = <String>{};
+  Timer? _unreadPollTimer;
 
   Future<List<_NodeEntry>> _loadCachedContacts() async {
     try {
@@ -114,14 +118,33 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
       setState(() => _searchQuery = _searchController.text.trim());
     });
     _initializeSelfContactId();
+    unawaited(_syncUnreadDirectDots());
+    _unreadPollTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_syncUnreadDirectDots()),
+    );
   }
 
 
 
   @override
   void dispose() {
+    _unreadPollTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _syncUnreadDirectDots() async {
+    try {
+      final next = await ChatUnreadDotService.directUnreadSet();
+      if (!mounted) return;
+      final same = next.length == _unreadDirectAddrs.length &&
+          next.every(_unreadDirectAddrs.contains);
+      if (same) return;
+      setState(() => _unreadDirectAddrs = next);
+    } catch (_) {
+      // Best effort.
+    }
   }
 
   Future<List<_NodeEntry>> _fetchNodes() async {
@@ -437,18 +460,40 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
                   Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      CircleAvatar(
-                        radius: 28,
-                        backgroundColor: mint,
-                        child: Text(
-                          _avatarLetters(node.name),
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.black87,
-                            letterSpacing: 0.2,
+                      Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          CircleAvatar(
+                            radius: 28,
+                            backgroundColor: mint,
+                            child: Text(
+                              _avatarLetters(node.name),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.black87,
+                                letterSpacing: 0.2,
+                              ),
+                            ),
                           ),
-                        ),
+                          if (_unreadDirectAddrs.contains(node.addr))
+                            Positioned(
+                              right: -2,
+                              top: -2,
+                              child: Container(
+                                width: 12,
+                                height: 12,
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.error,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: theme.colorScheme.surface,
+                                    width: 2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                       const SizedBox(height: 4),
                       Row(

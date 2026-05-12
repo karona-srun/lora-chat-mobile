@@ -8,6 +8,7 @@ import '../models/chat_message.dart';
 import 'group_details_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/local_database_service.dart';
+import '../services/chat_unread_dot_service.dart';
 import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
 import '../l10n/app_localizations.dart';
@@ -31,6 +32,7 @@ class GroupChatScreen extends StatefulWidget {
 class _GroupChatScreenState extends State<GroupChatScreen> {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
   static const String _powerModePrefKey = 'power_mode';
+  static const String _groupsChangedAtPrefKey = 'groups_changed_at_ms';
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isConnected = false;
@@ -60,6 +62,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   DateTime? _lastSoftAckAt;
   final Map<int, DateTime> _outgoingCreatedAtByIndex = <int, DateTime>{};
   static const Duration _softAckMatchWindow = Duration(minutes: 2);
+  Timer? _groupsSyncTimer;
+  int _lastObservedGroupsChangedAt = 0;
 
   @override
   void initState() {
@@ -78,8 +82,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       const Duration(milliseconds: 800),
       (_) => _fetchMessages(),
     );
+    _groupsSyncTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_refreshGroupRosterIfChanged()),
+    );
     _loadGroupMessagesFromDb();
     _fetchMessages();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(ChatUnreadDotService.clearGroupUnread(widget.groupUuid));
+    });
   }
 
   @override
@@ -109,7 +121,22 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     _messagePollTimer?.cancel();
+    _groupsSyncTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _refreshGroupRosterIfChanged() async {
+    if (!mounted) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final changedAt = prefs.getInt(_groupsChangedAtPrefKey) ?? 0;
+      if (changedAt > _lastObservedGroupsChangedAt) {
+        _lastObservedGroupsChangedAt = changedAt;
+        await _loadGroupMembers();
+      }
+    } catch (_) {
+      // Best effort.
+    }
   }
 
   String _normalizeAddress(String value) {
@@ -515,6 +542,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return (groupToken: token, payload: wrappedPayload);
   }
 
+  /// True if [lastRx] carries a GROUP_MSG frame for this group's wire token (UUID).
+  bool _lastRxContainsGroupMsgForThisChat(String lastRx) {
+    final token = widget.groupUuid.trim();
+    if (token.isEmpty) return false;
+    final needle = 'GROUP_MSG|$token|'.toUpperCase();
+    return lastRx.toUpperCase().contains(needle);
+  }
+
   Future<void> _fetchMessages() async {
     if (!_isConnected || deviceIp.trim().isEmpty) return;
     if (_suspendGroupStatusPoll) return;
@@ -560,7 +595,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           currentReceivedCount != null &&
           _lastRxReceivedCount != null &&
           currentReceivedCount == _lastRxReceivedCount;
-      if (isDuplicate) return;
+      if (isDuplicate) {
+        // Background notifier may update prefs before this screen ingests the frame.
+        // Reload from DB so the same "recent message" shown in notification appears here.
+        if (_saveDatabaseLocallyEnabled &&
+            _lastRxContainsGroupMsgForThisChat(lastRx)) {
+          await _loadGroupMessagesFromDb();
+        }
+        return;
+      }
 
       if (lastRx.startsWith('HELLO|')) {
         _lastRxText = lastRx;
@@ -577,8 +620,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _lastRxText = lastRx;
       _lastRxReceivedCount = currentReceivedCount;
 
-      // Ignore raw group invite control frames; they are handled by background service.
-      if (lastRx.startsWith('GROUP_INVITE|')) {
+      // Ignore group control frames; background service updates the local DB.
+      if (lastRx.contains('GROUP_INVITE|')) {
+        return;
+      }
+      if (lastRx.contains('GROUP_MEMBER_REMOVE|')) {
         return;
       }
 
@@ -796,8 +842,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _suspendGroupStatusPoll = true;
     try {
       var ackedCount = 0;
-      var noAckCount = 0;
-      var failedCount = 0;
+      var definitiveFailCount = 0;
 
       for (final target in sendTargets) {
         try {
@@ -815,38 +860,65 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
           if (response.statusCode == 200) {
             ackedCount += 1;
+          } else if (response.statusCode >= 400 &&
+              response.statusCode < 500 &&
+              response.statusCode != 408 &&
+              response.statusCode != 429) {
+            // Definite request-side failure (bad payload/params), safe to mark failed.
+            definitiveFailCount += 1;
           } else if (response.statusCode == 504 ||
               body.toUpperCase().contains('NO ACK') ||
               body.toUpperCase().contains('TIMEOUT')) {
-            noAckCount += 1;
+            // Soft miss — mesh / HTTP did not confirm delivery; not a hard send failure.
           } else {
-            failedCount += 1;
+            // Server-side or unknown status: treat as no-ack style uncertainty.
+          }
+        } on TimeoutException catch (_) {
+          // Radio busy / device handling send — same class as mesh "no ack", not hard fail.
+          if (mounted) {
+            setState(() {
+              _currentMessageLength = 0;
+            });
           }
         } catch (_) {
-          failedCount += 1;
-          setState(() {
-            _currentMessageLength = 0;
-          });
+          // Transport exceptions (socket, route, etc.) are usually transient.
+          // Keep resend UX by classifying as no-ack.
+          if (mounted) {
+            setState(() {
+              _currentMessageLength = 0;
+            });
+          }
         }
       }
 
-      if (failedCount > 0) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
-      } else if (noAckCount > 0 && ackedCount == 0) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
-      } else if (noAckCount > 0) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
-      } else {
+      final total = sendTargets.length;
+      if (ackedCount == total) {
         _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.acked);
+      } else if (ackedCount > 0) {
+        // At least one hop confirmed — do not mark whole group send as failed.
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+      } else if (definitiveFailCount == 0) {
+        // All paths are no-ack / timeout style (mesh did not confirm HTTP 200).
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+      } else if (definitiveFailCount == total) {
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+      } else {
+        // Mix of definitive failures and no-ack — prefer noAck so user can resend.
+        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
       }
     } catch (_) {
-      _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+      // Unexpected wrapper-level failure: keep retry-friendly no-ack state.
+      _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
       setState(() {
         _currentMessageLength = 0;
       });
       if (!mounted) return;
     } finally {
       _suspendGroupStatusPoll = false;
+      if (_saveDatabaseLocallyEnabled && mounted) {
+        // Merge any row persisted by background service (same frame as notification).
+        await _loadGroupMessagesFromDb();
+      }
     }
   }
 
@@ -961,9 +1033,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   bool _canResendMessage(ChatMessage message) {
-    return !message.isSystem &&
-        message.sender == 'You' &&
-        message.deliveryStatus == MessageDeliveryStatus.failed;
+    if (message.isSystem || message.sender != 'You') return false;
+    final s = message.deliveryStatus;
+    return s == MessageDeliveryStatus.failed ||
+        s == MessageDeliveryStatus.noAck;
   }
 
   Future<void> _resendMessageAt(int index) async {

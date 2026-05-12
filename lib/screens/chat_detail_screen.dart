@@ -8,6 +8,7 @@ import 'package:context_menu_android/features/context_menu/presentation/widget/i
 import '../l10n/app_localizations.dart';
 import '../models/chat_message.dart';
 import '../services/local_database_service.dart';
+import '../services/chat_unread_dot_service.dart';
 import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
 
@@ -73,6 +74,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     );
     // And fetch once immediately
     _fetchMessages();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final tid = widget.targetNodeId;
+      if (tid != null && tid.isNotEmpty) {
+        unawaited(
+          ChatUnreadDotService.clearDirectUnread(
+            ChatUnreadDotService.normalizeAddr(tid),
+          ),
+        );
+      }
+    });
   }
 
   @override
@@ -428,7 +440,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         text.contains('|GROUP_MSG|') ||
         text.contains('GROUP_INVITE|') ||
         text.contains('GROUP_REMOVE|') ||
-        text.contains('GROUP_LEAVE|');
+        text.contains('GROUP_LEAVE|') ||
+        text.contains('GROUP_MEMBER_REMOVE|');
   }
 
   Future<void> _appendIncomingDirectMessage({
@@ -726,9 +739,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   }
 
   bool _canResendMessage(ChatMessage message) {
-    return !message.isSystem &&
-        message.sender == 'You' &&
-        message.deliveryStatus == MessageDeliveryStatus.failed;
+    if (message.isSystem || message.sender != 'You') return false;
+    final s = message.deliveryStatus;
+    return s == MessageDeliveryStatus.failed ||
+        s == MessageDeliveryStatus.noAck;
   }
 
   Future<void> _resendMessageAt(int index) async {
@@ -775,6 +789,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       } else {
         _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.failed);
       }
+    } on TimeoutException catch (_) {
+      _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.noAck);
     } catch (_) {
       _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.failed);
     }

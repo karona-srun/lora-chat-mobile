@@ -18,11 +18,17 @@ class GroupDetailsScreen extends StatefulWidget {
 
 class _GroupDetailsScreenState extends State<GroupDetailsScreen>
     with WidgetsBindingObserver {
+  static const String _groupsChangedAtPrefKey = 'groups_changed_at_ms';
+
   GroupDetailsRecord? _details;
   List<ContactRecord> _contacts = const <ContactRecord>[];
   bool _loading = true;
   bool _removing = false;
   bool _updatingMembers = false;
+  Timer? _groupsSyncTimer;
+  int _lastObservedGroupsChangedAt = 0;
+  /// True while [Timer.periodic] sync reload runs (indeterminate bar, no full-screen block).
+  bool _silentRefreshing = false;
   bool _canRemoveGroup = false;
   bool _editingGroupName = false;
   bool _savingGroupName = false;
@@ -58,13 +64,39 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadGroupDetails();
+    _groupsSyncTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_refreshDetailsIfGroupMembersChanged()),
+    );
   }
 
   @override
   void dispose() {
+    _groupsSyncTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _groupNameController.dispose();
     super.dispose();
+  }
+
+  Future<void> _notifyGroupMetadataChanged() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_groupsChangedAtPrefKey, now);
+    _lastObservedGroupsChangedAt = now;
+  }
+
+  Future<void> _refreshDetailsIfGroupMembersChanged() async {
+    if (!mounted || _loading || _updatingMembers || _savingGroupName) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final changedAt = prefs.getInt(_groupsChangedAtPrefKey) ?? 0;
+      if (changedAt > _lastObservedGroupsChangedAt) {
+        _lastObservedGroupsChangedAt = changedAt;
+        await _loadGroupDetails(silent: true);
+      }
+    } catch (_) {
+      // Best effort: keep periodic sync resilient.
+    }
   }
 
   @override
@@ -152,8 +184,12 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
     return false;
   }
 
-  Future<void> _loadGroupDetails() async {
-    setState(() => _loading = true);
+  Future<void> _loadGroupDetails({bool silent = false}) async {
+    if (!silent) {
+      setState(() => _loading = true);
+    } else {
+      setState(() => _silentRefreshing = true);
+    }
     try {
       final details = await LocalDatabaseService.instance.getGroupDetails(
         widget.groupId,
@@ -184,7 +220,10 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       await _showMessageDialog(message: 'Failed to load group details');
     } finally {
       if (mounted) {
-        setState(() => _loading = false);
+        setState(() {
+          if (!silent) _loading = false;
+          _silentRefreshing = false;
+        });
       }
     }
   }
@@ -331,11 +370,9 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
         widget.groupId,
       );
       if (refreshedDetails != null) {
-        await _broadcastGroupInviteToAddedMembers(
-          details: refreshedDetails,
-          addedContactIds: contactIds,
-        );
+        await _broadcastGroupInviteToAllMembers(details: refreshedDetails);
       }
+      await _notifyGroupMetadataChanged();
       await _loadGroupDetails();
       if (!mounted) return;
       // ScaffoldMessenger.of(context).showSnackBar(
@@ -356,9 +393,9 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
     }
   }
 
-  Future<void> _broadcastGroupInviteToAddedMembers({
+  /// Notifies every member with the full roster so their DB matches after adds.
+  Future<void> _broadcastGroupInviteToAllMembers({
     required GroupDetailsRecord details,
-    required List<int> addedContactIds,
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -407,25 +444,11 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       }
       allMemberAddrs.add(ownerAddr);
       final membersCsv = allMemberAddrs.toList()..sort();
-
-      final contactMap = <int, ContactRecord>{
-        for (final contact in _contacts)
-          if (contact.id != null) contact.id!: contact,
-      };
-      final inviteTargets = <String>{};
-      for (final contactId in addedContactIds) {
-        final contact = contactMap[contactId];
-        if (contact == null) continue;
-        final addr = _normalizeAddress(contact.loraAddress);
-        if (addr.isEmpty || addr == '__SELF__') continue;
-        if (!_isValidNodeAddress(addr)) continue;
-        inviteTargets.add(addr);
-      }
-      if (inviteTargets.isEmpty) return;
+      if (allMemberAddrs.isEmpty) return;
 
       final payload =
           'GROUP_INVITE|${details.groupUuid}|${details.groupName}|$ownerAddr|${membersCsv.join(',')}';
-      for (final target in inviteTargets) {
+      for (final target in allMemberAddrs) {
         try {
           final uri = uriBase.replace(
             queryParameters: <String, String>{'msg': payload, 'to': target},
@@ -437,6 +460,53 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       }
     } catch (_) {
       // Best effort only: do not fail local member add.
+    }
+  }
+
+  /// Notifies all current members (including the removed user) so every device
+  /// drops the member locally via [MessageBackgroundService._handleGroupMemberRemove].
+  Future<void> _broadcastGroupMemberRemove({
+    required GroupDetailsRecord details,
+    required GroupMemberContactRecord removed,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedIp = prefs.getString('device_ip')?.trim() ?? '';
+      final savedPort = prefs.getString('device_port')?.trim() ?? '';
+      if (savedIp.isEmpty) return;
+
+      final parsedPort = int.tryParse(savedPort);
+      final uriBase = Uri(
+        scheme: 'http',
+        host: savedIp,
+        port: parsedPort ?? 80,
+        path: '/send',
+      );
+
+      final payload =
+          'GROUP_MEMBER_REMOVE|${details.groupUuid}|${removed.contactId}';
+
+      final targets = <String>{};
+      for (final m in details.members) {
+        final addr = _normalizeAddress(m.loraAddress);
+        if (addr.isEmpty || addr == '__SELF__') continue;
+        if (!_isValidNodeAddress(addr)) continue;
+        targets.add(addr);
+      }
+      if (targets.isEmpty) return;
+
+      for (final target in targets) {
+        try {
+          final uri = uriBase.replace(
+            queryParameters: <String, String>{'msg': payload, 'to': target},
+          );
+          await http.get(uri).timeout(const Duration(seconds: 5));
+        } catch (_) {
+          // Best effort only.
+        }
+      }
+    } catch (_) {
+      // Best effort only: local remove already completed.
     }
   }
 
@@ -482,10 +552,13 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
     );
     if (confirmed != true) return;
 
+    final snapshot = _details;
+    if (snapshot == null) return;
+
     setState(() => _updatingMembers = true);
     try {
-      final groupUuid = _details?.groupUuid;
-      if (groupUuid == null || groupUuid.isEmpty) return;
+      final groupUuid = snapshot.groupUuid;
+      if (groupUuid.isEmpty) return;
       await LocalDatabaseService.instance.upsertGroupMember(
         GroupMemberRecord(
           groupUuid: groupUuid,
@@ -494,6 +567,8 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
           isActive: false,
         ),
       );
+      await _broadcastGroupMemberRemove(details: snapshot, removed: member);
+      await _notifyGroupMetadataChanged();
       await _loadGroupDetails();
       if (!mounted) return;
       // await _showMessageDialog(message: 'Member removed');
@@ -902,15 +977,43 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _details == null
-          ? const Center(child: Text('Group not found'))
           : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, animation) {
+                    return SizeTransition(
+                      sizeFactor: animation,
+                      axisAlignment: -1,
+                      child: child,
+                    );
+                  },
+                  child: _silentRefreshing
+                      ? LinearProgressIndicator(
+                          key: const ValueKey('group_details_sync'),
+                          minHeight: 3,
+                          borderRadius: BorderRadius.circular(2),
+                          backgroundColor: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHighest,
+                        )
+                      : const SizedBox.shrink(
+                          key: ValueKey('group_details_sync_idle'),
+                        ),
+                ),
                 Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.all(16),
-                    children: [
-                      Container(
+                  child: _details == null
+                      ? const Center(child: Text('Group not found'))
+                      : Column(
+                          children: [
+                            Expanded(
+                              child: ListView(
+                                padding: const EdgeInsets.all(16),
+                                children: [
+                                  Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
                           color: Theme.of(context)
@@ -1075,71 +1178,90 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
                             ),
                           ),
                         ),
-                    ],
-                  ),
-                ),
-                SafeArea(
-                  top: false,
-                  minimum: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: _canRemoveGroup
-                        ? ElevatedButton.icon(
-                            onPressed: (_removing || _updatingMembers)
-                                ? null
-                                : _removeGroup,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
+                                ],
                               ),
                             ),
-                            icon: _removing
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white,
-                                    ),
-                                  )
-                                : const Icon(Icons.delete_outline),
-                            label: Text(
-                              _removing
-                                  ? AppLocalizations.of(context).tr('removing')
-                                  : AppLocalizations.of(
-                                      context,
-                                    ).tr('removeGroup'),
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
+                            SafeArea(
+                              top: false,
+                              minimum: const EdgeInsets.fromLTRB(
+                                16,
+                                8,
+                                16,
+                                16,
+                              ),
+                              child: SizedBox(
+                                width: double.infinity,
+                                child: _canRemoveGroup
+                                    ? ElevatedButton.icon(
+                                        onPressed: (_removing ||
+                                                _updatingMembers)
+                                            ? null
+                                            : _removeGroup,
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.red,
+                                          foregroundColor: Colors.white,
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 12,
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                          ),
+                                        ),
+                                        icon: _removing
+                                            ? const SizedBox(
+                                                width: 16,
+                                                height: 16,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                  color: Colors.white,
+                                                ),
+                                              )
+                                            : const Icon(Icons.delete_outline),
+                                        label: Text(
+                                          _removing
+                                              ? AppLocalizations.of(context)
+                                                  .tr('removing')
+                                              : AppLocalizations.of(context)
+                                                  .tr('removeGroup'),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      )
+                                    : ElevatedButton.icon(
+                                        onPressed: _leaveGroup,
+                                        icon: const Icon(
+                                          Icons.person_remove_alt_1,
+                                        ),
+                                        label: Text(
+                                          AppLocalizations.of(context)
+                                              .tr('leaveGroup'),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.red,
+                                          foregroundColor: Colors.white,
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 12,
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                          ),
+                                        ),
+                                      ),
                               ),
                             ),
-                          )
-                        : ElevatedButton.icon(
-                            onPressed: _leaveGroup,
-                            icon: const Icon(Icons.person_remove_alt_1),
-                            label: Text(
-                              AppLocalizations.of(context).tr('leaveGroup'),
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                          ),
-                  ),
+                          ],
+                        ),
                 ),
               ],
             ),

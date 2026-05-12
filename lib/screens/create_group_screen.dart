@@ -24,7 +24,8 @@ class CreateGroupScreen extends StatefulWidget {
   State<CreateGroupScreen> createState() => _CreateGroupScreenState();
 }
 
-class _CreateGroupScreenState extends State<CreateGroupScreen> {
+class _CreateGroupScreenState extends State<CreateGroupScreen>
+    with WidgetsBindingObserver {
   final TextEditingController _nameController = TextEditingController();
   final Set<String> _selectedContactIds = <String>{};
   List<ContactRecord> _contacts = const <ContactRecord>[];
@@ -33,17 +34,43 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   int? _selfContactId;
   String _selfCallSign = '';
   String _selfAddr = '';
+  bool _isReloadingContacts = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadContacts();
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Refresh whenever this route becomes active again in the widget tree.
+    _reloadContactsOnOpen();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    _reloadContactsOnOpen();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _nameController.dispose();
     super.dispose();
+  }
+
+  Future<void> _reloadContactsOnOpen() async {
+    if (_isReloadingContacts || _isSubmitting) return;
+    _isReloadingContacts = true;
+    try {
+      await _loadContacts();
+    } finally {
+      _isReloadingContacts = false;
+    }
   }
 
   String _normalizeAddress(String value) {

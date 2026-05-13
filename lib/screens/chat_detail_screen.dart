@@ -608,23 +608,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       }
 
       // Plain LoRa payload (firmware stores raw `rc.data` in lastReceived).
+      // There is no sender/recipient in this shape, but `lastReceived` is
+      // global for the node — attributing it to the currently open direct chat
+      // would show other peers' traffic in the wrong thread. Use tagged / MSG /
+      // RELAY branches above when the firmware includes addresses.
       final plainText = _sanitizeIncomingText(lastRx);
       if (plainText.isEmpty) return;
-      final splitParts = plainText
-          .split('|')
-          .map((part) => part.trim())
-          .where((part) => part.isNotEmpty)
-          .toList();
-      final displayText =
-          splitParts.isNotEmpty ? splitParts.last : plainText;
-
-      final peerLabel = widget.title.trim().isNotEmpty
-          ? widget.title.trim()
-          : 'Peer';
-      await _appendIncomingDirectMessage(
-        text: displayText,
-        sender: peerLabel,
-      );
+      return;
     } catch (e) {
       debugPrint('Failed to fetch messages: $e');
     }

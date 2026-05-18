@@ -389,9 +389,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     var text = raw.trim();
     // Handle nested wrapper payloads:
     // - MSG|SRC|DEST|message
+    // - MSG2|ADDR|SRC|DEST|message
     // - RELAY|DEST|MSG|SRC|DEST|message
     final nestedMsg = RegExp(
-      r'^(?:RELAY\|[0-9A-Fa-f]{2,4}\|)?MSG\|[0-9A-Fa-f]{2,4}\|[0-9A-Fa-f]{2,4}\|(.+)$',
+      r'^(?:RELAY\|[0-9A-Fa-f]{2,4}\|)?MSG\|[0-9A-Fa-f]{2,4}\|[0-9A-Fa-f]{2,4}\|?MSG2\|[0-9A-Fa-f]{2,4}\|[0-9A-Fa-f]{2,4}\|[0-9A-Fa-f]{2,4}\|?(.+)$',
       caseSensitive: false,
     ).firstMatch(text);
     if (nestedMsg != null) {
@@ -501,6 +502,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     r'^MSG\|([0-9A-Fa-f]{2,4})\|([0-9A-Fa-f]{2,4})\|(.+)$',
     caseSensitive: false,
   );
+  static final RegExp _reMsgPipe2 = RegExp(
+    r'^MSG2\|([0-9A-Fa-f]{2,4})\|([0-9A-Fa-f]{2,4})\|([0-9A-Fa-f]{2,4})\|(.+)$',
+    caseSensitive: false,
+  );
 
   Future<void> _fetchMessages() async {
     if (!_isConnected || deviceIp.trim().isEmpty) return;
@@ -579,6 +584,33 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         await _appendIncomingDirectMessage(
           text: text,
           sender: 'Via relay -> 0x$destHex',
+        );
+        return;
+      }
+
+      // MSG2|SRC|DEST|SRC2|DEST2|payload
+      final msgRelay2 = _reMsgPipe2.firstMatch(lastRx);
+      if (msgRelay2 != null) {
+        final msgPayload = (msgRelay2.group(6) ?? '').trim();
+        if (_isGroupTrafficFrame(msgPayload)) return;
+        final srcNorm =
+            _normalizeNodeHex((msgRelay2.group(1) ?? '').toUpperCase());
+        final destNorm =
+            _normalizeNodeHex((msgRelay2.group(2) ?? '').toUpperCase());
+        final src2Norm =
+            _normalizeNodeHex((msgRelay2.group(3) ?? '').toUpperCase());
+        final dest2Norm =
+            _normalizeNodeHex((msgRelay2.group(4) ?? '').toUpperCase());
+        final text = _sanitizeIncomingTextRelay(msgPayload);
+        if (text.isEmpty) return;
+        final target = _targetHex;
+        if (target != null &&
+            destNorm.toUpperCase() != target.toUpperCase()) {
+          return;
+        }
+        await _appendIncomingDirectMessage(
+          text: text,
+          sender: 'Via relay $srcNorm -> 0x$destNorm -> 0x$src2Norm -> 0x$dest2Norm',
         );
         return;
       }

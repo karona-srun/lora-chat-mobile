@@ -149,9 +149,9 @@ lib/
 
 ## Technical Details
 
-### RF24 Communication
+### E22-900T33S Communication
 
-- **Protocol**: nRF24L01+ 2.4GHz radio
+- **Protocol**: E22-900T33S 915Mhz radio
 - **Data Rate**: 1 Mbps
 - **Power Level**: Low (RF24_PA_LOW)
 - **Pipes**: 

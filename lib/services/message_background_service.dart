@@ -74,7 +74,6 @@ class MessageBackgroundService {
   static void setAppForegroundState(bool isForeground) {
     _isAppInForeground = isForeground;
     if (isForeground) {
-      // Poll immediately when app returns to foreground to avoid stale delay.
       unawaited(pollAndNotify(allowWhenForeground: true));
     }
   }
@@ -86,19 +85,19 @@ class MessageBackgroundService {
     _isPollingNow = true;
 
     try {
-    final prefs = await SharedPreferences.getInstance();
-    final ip = prefs.getString('device_ip')?.trim() ?? '';
-    final port = prefs.getString('device_port')?.trim() ?? '';
+      final prefs = await SharedPreferences.getInstance();
+      final ip = prefs.getString('device_ip')?.trim() ?? '';
+      final port = prefs.getString('device_port')?.trim() ?? '';
 
-    if (ip.isEmpty) return;
+      if (ip.isEmpty) return;
 
-    final parsedPort = int.tryParse(port);
-    final uri = Uri(
-      scheme: 'http',
-      host: ip,
-      port: parsedPort ?? 80,
-      path: '/api/status',
-    );
+      final parsedPort = int.tryParse(port);
+      final uri = Uri(
+        scheme: 'http',
+        host: ip,
+        port: parsedPort ?? 80,
+        path: '/api/status',
+      );
 
       final response = await http.get(uri).timeout(
             const Duration(seconds: 3),
@@ -155,8 +154,6 @@ class MessageBackgroundService {
 
       await _markUnreadDotsFromFrame(lastRx);
 
-      // debugPrint('incoming: ${incoming.sender} ${incoming.text}');    
-
       if (!allowWhenForeground && _isAppInForeground) return;
 
       await _showNotification(
@@ -165,7 +162,7 @@ class MessageBackgroundService {
       );
 
     } catch (_) {
-      // Keep background poll resilient; ignore transient network/parse errors.
+      // Keep loops operational across background context drops
     } finally {
       _isPollingNow = false;
     }
@@ -275,15 +272,12 @@ class MessageBackgroundService {
     if (parts.length < 2) return;
     final groupUuid = parts[1].trim();
     if (groupUuid.isEmpty) return;
-    debugPrint('----------------- _handleGroupRemove ----------------------');
-    debugPrint('groupUuid: $groupUuid');
     await LocalDatabaseService.instance.ensureInitialized();
     await LocalDatabaseService.instance.removeGroupByUuid(groupUuid);
     await _markGroupsChanged();
   }
 
   static Future<void> _handleGroupLeave(String raw) async {
-    // Format: GROUP_LEAVE|<groupUuid>|<contactId>
     final normalizedRaw = _extractControlPayload(raw, 'GROUP_LEAVE');
     if (normalizedRaw == null) return;
     final parts = normalizedRaw.split('|');
@@ -302,8 +296,6 @@ class MessageBackgroundService {
     await _markGroupsChanged();
   }
 
-  /// Wire format: `GROUP_MEMBER_REMOVE`, group UUID, numeric contact id (pipe-separated).
-  /// Owner removed another member; all devices should drop that member locally.
   static Future<void> _handleGroupMemberRemove(String raw) async {
     final normalizedRaw = _extractControlPayload(raw, 'GROUP_MEMBER_REMOVE');
     if (normalizedRaw == null) return;
@@ -327,23 +319,54 @@ class MessageBackgroundService {
     if (_containsControlFrame(message, 'GROUP_REMOVE')) return null;
     if (_containsControlFrame(message, 'GROUP_LEAVE')) return null;
     if (_containsControlFrame(message, 'GROUP_MEMBER_REMOVE')) return null;
+
+    // --- PRIORITY 1: EXPLICITLY INTERCEPT AND RETURN MSG2 PROTOCOLS ---
+    final pipeDirect2 = _parsePipeDirectMessage2(message);
+    if (pipeDirect2 != null) {
+      return _IncomingMessage(
+        sender: 'Node 0x${pipeDirect2.fromAddr}',
+        text: pipeDirect2.text,
+      );
+    }
+
+    // --- PRIORITY 2: CHECK FOR NESTED MSG2 VALUES WRAPPED IN GROUPS ---
+    final pipeGroup = _parsePipeGroupMessage(message);
+    if (pipeGroup != null) {
+      final nestedM2 = _parsePipeDirectMessage2(pipeGroup.text);
+      if (nestedM2 != null) {
+        return _IncomingMessage(
+          sender: 'Node 0x${nestedM2.fromAddr}',
+          text: nestedM2.text,
+        );
+      }
+      return _IncomingMessage(sender: pipeGroup.senderName, text: pipeGroup.text);
+    }
+
     if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(message)) {
       return null;
     }
 
+    // --- PRIORITY 3: SEQUENTIAL EVALUATION FOR STANDARD TRANSMISSIONS ---
     final tagged = RegExp(
       r'^From 0x([0-9A-Fa-f]{2,4})\s*:\s*(.+)$',
       caseSensitive: false,
     ).firstMatch(message);
+    
     if (tagged != null) {
       var fromHex = (tagged.group(1) ?? '').toUpperCase();
       final taggedPayload = (tagged.group(2) ?? '').trim();
       if (taggedPayload.isEmpty) return null;
       if (fromHex.length == 2) fromHex = '00$fromHex';
 
-      // Handles: From 0x0001: 0001|0003|GROUP_MSG|grp3_...|LM-1&0001: hello
       final embeddedGroup = _parsePipeGroupMessage(taggedPayload);
       if (embeddedGroup != null) {
+        final innerNested = _parsePipeDirectMessage2(embeddedGroup.text);
+        if (innerNested != null) {
+          return _IncomingMessage(
+            sender: 'Node 0x${innerNested.fromAddr}',
+            text: innerNested.text,
+          );
+        }
         return _IncomingMessage(
           sender: embeddedGroup.senderName,
           text: embeddedGroup.text,
@@ -356,35 +379,6 @@ class MessageBackgroundService {
         sender: parsedTagged.senderName ?? 'Node 0x$fromHex',
         text: parsedTagged.text,
       );
-    }
-
-    final relay = RegExp(
-      r'^RELAY\|([0-9A-Fa-f]{4})\|(.+)$',
-      caseSensitive: false,
-    ).firstMatch(message);
-    if (relay != null) {
-      final relayPayload = (relay.group(2) ?? '').trim();
-      if (relayPayload.isEmpty) return null;
-
-      final relayGroup = _parsePipeGroupMessage(relayPayload);
-      if (relayGroup != null) {
-        return _IncomingMessage(
-          sender: relayGroup.senderName,
-          text: relayGroup.text,
-        );
-      }
-
-      final parsedRelay = _splitSenderFromPayload(relayPayload);
-      if (parsedRelay.text.isEmpty) return null;
-      return _IncomingMessage(
-        sender: parsedRelay.senderName ?? 'New message',
-        text: parsedRelay.text,
-      );
-    }
-
-    final pipeGroup = _parsePipeGroupMessage(message);
-    if (pipeGroup != null) {
-      return _IncomingMessage(sender: pipeGroup.senderName, text: pipeGroup.text);
     }
 
     final pipeDirect = _parsePipeDirectMessage(message);
@@ -448,12 +442,33 @@ class MessageBackgroundService {
     return (fromAddr: fromAddr, toAddr: toAddr, text: text);
   }
 
+  static ({String msgId, String fromAddr, String toAddr, String text})?
+    _parsePipeDirectMessage2(String raw) {
+    final parts = raw.split('|').map((e) => e.trim()).toList();
+    
+    final msg2Index = parts.indexWhere((e) => e.toUpperCase() == 'MSG2');
+    if (msg2Index == -1 || parts.length < msg2Index + 5) return null;
+
+    final msgId = parts[msg2Index + 1].trim();
+    final fromAddr = _normalizeAddress(parts[msg2Index + 2]);
+    final toAddr = _normalizeAddress(parts[msg2Index + 3]);
+    final text = _sanitizeIncomingText(parts.sublist(msg2Index + 4).join('|'));
+
+    if (msgId.isEmpty || fromAddr.isEmpty || toAddr.isEmpty || text.isEmpty) {
+      return null;
+    }
+
+    return (
+      msgId: msgId,
+      fromAddr: fromAddr,
+      toAddr: toAddr,
+      text: text,
+    );
+  }
+
   static ({String fromAddr, int groupId, String senderName, String senderAddr, String text})?
       _parsePipeGroupMessage(String raw) {
     final parts = raw.split('|').map((e) => e.trim()).toList();
-    // Supported group formats:
-    // 1) <from>|<to>|GROUP_MSG|<groupToken>|<senderName>&<senderAddr>: <text>
-    // 2) GROUP_MSG|<groupToken>|<senderName>&<senderAddr>: <text>
     String fromAddr = '';
     String groupToken = '';
     String payload = '';
@@ -464,7 +479,6 @@ class MessageBackgroundService {
       groupToken = parts[3];
       payload = parts.sublist(4).join('|').trim();
     } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
-      // No explicit `from` address embedded; leave it empty and rely on senderAddr.
       groupToken = parts[1];
       payload = parts.sublist(2).join('|').trim();
     } else {
@@ -504,7 +518,6 @@ class MessageBackgroundService {
     return null;
   }
 
-  /// Updates list-row unread dots for the contact / group that sent this frame.
   static Future<void> _markUnreadDotsFromFrame(String lastRx) async {
     if (_isIgnoredStatusNoise(lastRx)) return;
     if (_containsControlFrame(lastRx, 'GROUP_INVITE')) return;
@@ -516,6 +529,25 @@ class MessageBackgroundService {
     final myAddr = _normalizeAddress(
       (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
     );
+
+    final m2 = _parsePipeDirectMessage2(lastRx);
+    if (m2 != null) {
+      if (myAddr.isEmpty || m2.fromAddr != myAddr) {
+        await ChatUnreadDotService.markDirectUnread(m2.fromAddr);
+      }
+      return;
+    }
+
+    final gCheck = _parsePipeGroupMessage(lastRx);
+    if (gCheck != null) {
+      final subM2 = _parsePipeDirectMessage2(gCheck.text);
+      if (subM2 != null) {
+        if (myAddr.isEmpty || subM2.fromAddr != myAddr) {
+          await ChatUnreadDotService.markDirectUnread(subM2.fromAddr);
+        }
+        return;
+      }
+    }
 
     String? taggedInner;
     String? taggedFromHex;
@@ -530,28 +562,16 @@ class MessageBackgroundService {
       taggedFromHex = _normalizeAddress(fh);
     }
 
-    String? relayInner;
-    final relay = RegExp(
-      r'^RELAY\|([0-9A-Fa-f]{4})\|(.+)$',
-      caseSensitive: false,
-    ).firstMatch(lastRx);
-    if (relay != null) {
-      relayInner = relay.group(2)?.trim();
-    }
-
     final blobs = <String>[
       lastRx,
       if (taggedInner != null && taggedInner.isNotEmpty) taggedInner,
-      if (relayInner != null && relayInner.isNotEmpty) relayInner,
     ];
 
     for (final blob in blobs) {
       final g = _parsePipeGroupMessage(blob);
       if (g != null) {
         final uuid = _groupTokenFromWire(blob);
-        if (uuid != null &&
-            uuid.isNotEmpty &&
-            (myAddr.isEmpty || g.senderAddr != myAddr)) {
+        if (uuid != null && uuid.isNotEmpty && (myAddr.isEmpty || g.senderAddr != myAddr)) {
           await ChatUnreadDotService.markGroupUnread(uuid);
         }
         return;
@@ -568,9 +588,7 @@ class MessageBackgroundService {
       }
     }
 
-    if (taggedFromHex != null &&
-        taggedFromHex.isNotEmpty &&
-        (myAddr.isEmpty || taggedFromHex != myAddr)) {
+    if (taggedFromHex != null && taggedFromHex.isNotEmpty && (myAddr.isEmpty || taggedFromHex != myAddr)) {
       await ChatUnreadDotService.markDirectUnread(taggedFromHex);
     }
   }
@@ -592,11 +610,30 @@ class MessageBackgroundService {
   static Future<void> _persistIncomingMessage(String raw) async {
     final prefs = await SharedPreferences.getInstance();
     final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
-    // Respect setting: only persist incoming messages when local DB saving is enabled.
+    
     if (!saveDbEnabled) return;
     if (_isIgnoredStatusNoise(raw)) return;
+
+    await LocalDatabaseService.instance.ensureInitialized();
+    final selfContactId = await _ensureSelfContact();
+    final myAddr = _normalizeAddress((prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim());
+
+    final pipeDirect2 = _parsePipeDirectMessage2(raw);
+    if (pipeDirect2 != null) {
+      await _saveDirectMsg2ToDatabase(pipeDirect2, myAddr);
+      return;
+    }
+
+    final groupCheck = _parsePipeGroupMessage(raw);
+    if (groupCheck != null) {
+      final nestedM2 = _parsePipeDirectMessage2(groupCheck.text);
+      if (nestedM2 != null) {
+        await _saveDirectMsg2ToDatabase(nestedM2, myAddr);
+        return; 
+      }
+    }
+
     if (_containsControlFrame(raw, 'GROUP_INVITE')) {
-      // Auto-create/update group and members from invite payload.
       await _handleGroupInvite(raw);
       return;
     }
@@ -605,12 +642,7 @@ class MessageBackgroundService {
       return;
     }
 
-    await LocalDatabaseService.instance.ensureInitialized();
-    final selfContactId = await _ensureSelfContact();
-
-    final pipeGroup = _parsePipeGroupMessage(raw);
-    if (pipeGroup != null) {
-      // Group wire payload uses a group token (usually group UUID). Persist using the DB group id.
+    if (groupCheck != null) {
       final parts = raw.split('|').map((e) => e.trim()).toList();
       String? groupToken;
       if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
@@ -622,23 +654,19 @@ class MessageBackgroundService {
       final groupDbId = groupUuid.isEmpty
           ? null
           : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
-      if (groupDbId == null) {
-        // If group isn't known locally yet (no invite processed), skip persisting
-        // to avoid orphan messages that the UI can't query.
-        return;
-      }
+      if (groupDbId == null) return;
+      
       final fromContactId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
-          loraAddress: pipeGroup.senderAddr,
-          displayName: pipeGroup.senderName,
+          loraAddress: groupCheck.senderAddr,
+          displayName: groupCheck.senderName,
         ),
       );
-      final isDuplicate =
-          await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+      final isDuplicate = await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
         chatType: ChatType.group,
         fromContactId: fromContactId,
         groupId: groupDbId,
-        payload: pipeGroup.text,
+        payload: groupCheck.text,
       );
       if (!isDuplicate) {
         await LocalDatabaseService.instance.insertMessage(
@@ -647,15 +675,12 @@ class MessageBackgroundService {
             chatType: ChatType.group,
             fromContactId: fromContactId.toString(),
             groupId: groupDbId.toString(),
-            payload: pipeGroup.text,
+            payload: groupCheck.text,
             deliveryStatus: DeliveryStatus.delivered,
             receivedAt: DateTime.now().toUtc().toIso8601String(),
           ),
         );
       }
-      debugPrint(
-        'Group message is saved to database (groupId=$groupDbId, from=${pipeGroup.senderAddr})',
-      );
       return;
     }
 
@@ -667,21 +692,14 @@ class MessageBackgroundService {
           displayName: 'Node 0x${pipeDirect.fromAddr}',
         ),
       );
+
       final toContactId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
           loraAddress: pipeDirect.toAddr,
-          displayName: pipeDirect.toAddr == _normalizeAddress(
-                  (await SharedPreferences.getInstance())
-                          .getString('myAddr') ??
-                      (await SharedPreferences.getInstance())
-                          .getString('my_addr') ??
-                      '')
-              ? 'You'
-              : 'Node 0x${pipeDirect.toAddr}',
+          displayName: pipeDirect.toAddr == myAddr ? 'You' : 'Node 0x${pipeDirect.toAddr}',
         ),
       );
-      final isDuplicate =
-          await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+      final isDuplicate = await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
         chatType: ChatType.direct,
         fromContactId: fromContactId,
         toContactId: toContactId,
@@ -700,61 +718,7 @@ class MessageBackgroundService {
           ),
         );
       }
-      debugPrint('Direct message is saved to database');
       return;
-    }
-
-    final relay = RegExp(
-      r'^RELAY\|([0-9A-Fa-f]{4})\|(.+)$',
-      caseSensitive: false,
-    ).firstMatch(raw);
-    if (relay != null) {
-      final relayPayload = (relay.group(2) ?? '').trim();
-      if (relayPayload.isNotEmpty) {
-        final relayGroup = _parsePipeGroupMessage(relayPayload);
-        if (relayGroup != null) {
-          final parts = relayPayload.split('|').map((e) => e.trim()).toList();
-          String? groupToken;
-          if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
-            groupToken = parts[3];
-          } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
-            groupToken = parts[1];
-          }
-          final groupUuid = (groupToken ?? '').trim();
-          final groupDbId = groupUuid.isEmpty
-              ? null
-              : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
-          if (groupDbId == null) return;
-          final fromContactId =
-              await LocalDatabaseService.instance.upsertContact(
-            ContactRecord(
-              loraAddress: relayGroup.senderAddr,
-              displayName: relayGroup.senderName,
-            ),
-          );
-          final isDuplicate = await LocalDatabaseService.instance
-              .hasRecentDuplicateIncomingMessage(
-            chatType: ChatType.group,
-            fromContactId: fromContactId,
-            groupId: groupDbId,
-            payload: relayGroup.text,
-          );
-          if (!isDuplicate) {
-            await LocalDatabaseService.instance.insertMessage(
-              MessageRecord(
-                messageUuid: _newMessageUuid('grp_$groupDbId'),
-                chatType: ChatType.group,
-                fromContactId: fromContactId.toString(),
-                groupId: groupDbId.toString(),
-                payload: relayGroup.text,
-                deliveryStatus: DeliveryStatus.delivered,
-                receivedAt: DateTime.now().toUtc().toIso8601String(),
-              ),
-            );
-          }
-          return;
-        }
-      }
     }
 
     final fromTagged = RegExp(
@@ -766,51 +730,13 @@ class MessageBackgroundService {
       final taggedPayload = (fromTagged.group(2) ?? '').trim();
       if (fromAddr.isEmpty || taggedPayload.isEmpty) return;
       if (_isGroupTrafficFrame(taggedPayload)) {
-        // Avoid routing group/control frames into direct chats when group parser
-        // cannot fully parse a firmware variant.
-        return;
-      }
-
-      // Handles: From 0x0001: 0001|0003|GROUP_MSG|grp3_...|LM-1&0001: hello
-      final embeddedPipeGroup = _parsePipeGroupMessage(taggedPayload);
-      if (embeddedPipeGroup != null) {
-        final parts = taggedPayload.split('|').map((e) => e.trim()).toList();
-        String? groupToken;
-        if (parts.length >= 5 && parts[2].toUpperCase() == 'GROUP_MSG') {
-          groupToken = parts[3];
-        } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
-          groupToken = parts[1];
-        }
-        final groupUuid = (groupToken ?? '').trim();
-        final groupDbId = groupUuid.isEmpty
-            ? null
-            : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
-        if (groupDbId == null) return;
-        final fromContactId = await LocalDatabaseService.instance.upsertContact(
-          ContactRecord(
-            loraAddress: embeddedPipeGroup.senderAddr,
-            displayName: embeddedPipeGroup.senderName,
-          ),
-        );
-        final isDuplicate =
-            await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
-          chatType: ChatType.group,
-          fromContactId: fromContactId,
-          groupId: groupDbId,
-          payload: embeddedPipeGroup.text,
-        );
-        if (!isDuplicate) {
-          await LocalDatabaseService.instance.insertMessage(
-            MessageRecord(
-              messageUuid: _newMessageUuid('grp_$groupDbId'),
-              chatType: ChatType.group,
-              fromContactId: fromContactId.toString(),
-              groupId: groupDbId.toString(),
-              payload: embeddedPipeGroup.text,
-              deliveryStatus: DeliveryStatus.delivered,
-              receivedAt: DateTime.now().toUtc().toIso8601String(),
-            ),
-          );
+        final subGroup = _parsePipeGroupMessage(taggedPayload);
+        if (subGroup != null) {
+          final subM2 = _parsePipeDirectMessage2(subGroup.text);
+          if (subM2 != null) {
+            await _saveDirectMsg2ToDatabase(subM2, myAddr);
+            return;
+          }
         }
         return;
       }
@@ -834,69 +760,53 @@ class MessageBackgroundService {
           receivedAt: DateTime.now().toUtc().toIso8601String(),
         ),
       );
-
-      final fromGroups =
-          await LocalDatabaseService.instance.listActiveGroupIdsForContact(
-        fromContactId,
-      );
-      if (fromGroups.isEmpty) return;
-      final selfGroups =
-          await LocalDatabaseService.instance.listActiveGroupIdsForContact(
-        selfContactId,
-      );
-      final selfGroupSet = selfGroups.toSet();
-      for (final groupId in fromGroups) {
-        if (!selfGroupSet.contains(groupId)) continue;
-        await LocalDatabaseService.instance.insertMessage(
-          MessageRecord(
-            messageUuid: _newMessageUuid('grp_$groupId'),
-            chatType: ChatType.group,
-            fromContactId: fromContactId.toString(),
-            groupId: groupId.toString(),
-            payload: parsed.text,
-            deliveryStatus: DeliveryStatus.delivered,
-            receivedAt: DateTime.now().toUtc().toIso8601String(),
-          ),
-        );
-      }
       return;
     }
+  }
 
-    final plain = _splitSenderFromPayload(raw);
-    if (plain.text.isEmpty || plain.senderName == null) return;
-
-    final sender = plain.senderName!.trim();
-    if (sender.isEmpty) return;
-    final senderContactId = await LocalDatabaseService.instance.upsertContact(
+  static Future<void> _saveDirectMsg2ToDatabase(
+    ({String msgId, String fromAddr, String toAddr, String text}) data,
+    String myAddr,
+  ) async {
+    final fromContactId = await LocalDatabaseService.instance.upsertContact(
       ContactRecord(
-        loraAddress: '__GROUP_SENDER__${sender.toUpperCase()}',
-        displayName: sender,
+        loraAddress: data.fromAddr,
+        displayName: 'Node 0x${data.fromAddr}',
       ),
     );
-    final senderGroups =
-        await LocalDatabaseService.instance.listActiveGroupIdsForContact(
-      senderContactId,
+
+    final toContactId = await LocalDatabaseService.instance.upsertContact(
+      ContactRecord(
+        loraAddress: data.toAddr,
+        displayName: data.toAddr == myAddr ? 'You' : 'Node 0x${data.toAddr}',
+      ),
     );
-    for (final groupId in senderGroups) {
+
+    final isDuplicate = await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
+      chatType: ChatType.direct,
+      fromContactId: fromContactId,
+      toContactId: toContactId,
+      payload: data.text,
+    );
+
+    if (!isDuplicate) {
       await LocalDatabaseService.instance.insertMessage(
         MessageRecord(
-          messageUuid: _newMessageUuid('grp_$groupId'),
-          chatType: ChatType.group,
-          fromContactId: senderContactId.toString(),
-          groupId: groupId.toString(),
-          payload: plain.text,
+          messageUuid: 'msg_${data.msgId}',
+          chatType: ChatType.direct,
+          fromContactId: fromContactId.toString(),
+          toContactId: toContactId.toString(),
+          payload: data.text,
           deliveryStatus: DeliveryStatus.delivered,
           receivedAt: DateTime.now().toUtc().toIso8601String(),
         ),
       );
+      debugPrint('MSG2 ROUTED TO DIRECT SUCCESSFULLY: ${data.fromAddr} -> ${data.toAddr} : ${data.text}');
     }
   }
 
   static bool _isIgnoredStatusNoise(String message) {
     if (message.startsWith('HELLO|')) return true;
-    if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(message)) {
-      return true;
-    }
     return false;
   }
 
@@ -918,8 +828,6 @@ class MessageBackgroundService {
       return raw.substring(directIndex).trim();
     }
 
-    // Also support tagged transport frames:
-    // "From 0x0003: 0003|0002|GROUP_INVITE|..."
     final taggedMatch = RegExp(
       r'^From 0x[0-9A-Fa-f]{2,4}\s*:\s*(.+)$',
       caseSensitive: false,
@@ -973,8 +881,6 @@ class MessageBackgroundService {
       body,
       details,
     );
-
-
   }
 
   static Future<void> _initializeNotifications() async {
@@ -1037,7 +943,6 @@ class MessageBackgroundService {
 
   static void _startForegroundPolling() {
     _foregroundTimer?.cancel();
-    // Trigger immediately on startup; don't wait for first timer tick.
     unawaited(pollAndNotify(allowWhenForeground: true));
     _foregroundTimer = Timer.periodic(
       const Duration(seconds: 2),

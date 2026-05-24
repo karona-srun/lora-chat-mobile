@@ -35,20 +35,22 @@ class MessageBackgroundService {
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
-  static const AndroidNotificationChannel _soundChannel = AndroidNotificationChannel(
-    'lomhor_new_messages_sound',
-    'New messages (sound)',
-    description: 'Alerts when a new LoRa message is received.',
-    importance: Importance.high,
-    playSound: true,
-  );
-  static const AndroidNotificationChannel _silentChannel = AndroidNotificationChannel(
-    'lomhor_new_messages_silent',
-    'New messages (silent)',
-    description: 'Alerts when a new LoRa message is received.',
-    importance: Importance.high,
-    playSound: false,
-  );
+  static const AndroidNotificationChannel _soundChannel =
+      AndroidNotificationChannel(
+        'lomhor_new_messages_sound',
+        'New messages (sound)',
+        description: 'Alerts when a new LoRa message is received.',
+        importance: Importance.high,
+        playSound: true,
+      );
+  static const AndroidNotificationChannel _silentChannel =
+      AndroidNotificationChannel(
+        'lomhor_new_messages_silent',
+        'New messages (silent)',
+        description: 'Alerts when a new LoRa message is received.',
+        importance: Importance.high,
+        playSound: false,
+      );
 
   static Timer? _foregroundTimer;
   static bool _initialized = false;
@@ -78,9 +80,7 @@ class MessageBackgroundService {
     }
   }
 
-  static Future<void> pollAndNotify({
-    required bool allowWhenForeground,
-  }) async {
+  static Future<void> pollAndNotify({required bool allowWhenForeground}) async {
     if (_isPollingNow) return;
     _isPollingNow = true;
 
@@ -99,7 +99,9 @@ class MessageBackgroundService {
         path: '/api/status',
       );
 
-      final response = await http.get(uri).timeout(
+      final response = await http
+          .get(uri)
+          .timeout(
             const Duration(seconds: 3),
             onTimeout: () => throw Exception('Connection timeout'),
           );
@@ -121,9 +123,11 @@ class MessageBackgroundService {
         (traffic['received'] ?? '').toString(),
       );
 
-      final previousLastRx = prefs.getString(_lastReceivedTextPrefKey)?.trim() ?? '';
+      final previousLastRx =
+          prefs.getString(_lastReceivedTextPrefKey)?.trim() ?? '';
       final previousReceivedCount = prefs.getInt(_lastReceivedCountPrefKey);
-      final isDuplicateByTextAndCount = previousLastRx == lastRx &&
+      final isDuplicateByTextAndCount =
+          previousLastRx == lastRx &&
           currentReceivedCount != null &&
           previousReceivedCount != null &&
           currentReceivedCount == previousReceivedCount;
@@ -156,11 +160,7 @@ class MessageBackgroundService {
 
       if (!allowWhenForeground && _isAppInForeground) return;
 
-      await _showNotification(
-        title: incoming.sender,
-        body: incoming.text,
-      );
-
+      await _showNotification(title: incoming.sender, body: incoming.text);
     } catch (_) {
       // Keep loops operational across background context drops
     } finally {
@@ -209,10 +209,7 @@ class MessageBackgroundService {
     Future<int> ensureContact(String addr) {
       final displayName = '0x$addr';
       return LocalDatabaseService.instance.upsertContact(
-        ContactRecord(
-          loraAddress: addr,
-          displayName: displayName,
-        ),
+        ContactRecord(loraAddress: addr, displayName: displayName),
       );
     }
 
@@ -234,8 +231,8 @@ class MessageBackgroundService {
         final addrPart = rawMember.contains(':')
             ? rawMember.split(':').last.trim()
             : rawMember.contains('&')
-                ? rawMember.split('&').last.trim()
-                : rawMember;
+            ? rawMember.split('&').last.trim()
+            : rawMember;
         final addr = _normalizeAddress(addrPart);
         if (addr.isNotEmpty) {
           memberAddrs.add(addr);
@@ -320,8 +317,18 @@ class MessageBackgroundService {
     if (_containsControlFrame(message, 'GROUP_LEAVE')) return null;
     if (_containsControlFrame(message, 'GROUP_MEMBER_REMOVE')) return null;
 
+    final relayDirect = _parseRelayDirectMessage(message);
+    if (relayDirect != null) {
+      return _IncomingMessage(
+        sender: 'Node 0x${relayDirect.fromAddr} via relay',
+        text: relayDirect.text,
+      );
+    }
+
     // --- PRIORITY 1: EXPLICITLY INTERCEPT AND RETURN MSG2 PROTOCOLS ---
     final pipeDirect2 = _parsePipeDirectMessage2(message);
+    debugPrint("======== 11 =========");
+    debugPrint(pipeDirect2.toString());
     if (pipeDirect2 != null) {
       return _IncomingMessage(
         sender: 'Node 0x${pipeDirect2.fromAddr}',
@@ -334,12 +341,17 @@ class MessageBackgroundService {
     if (pipeGroup != null) {
       final nestedM2 = _parsePipeDirectMessage2(pipeGroup.text);
       if (nestedM2 != null) {
+        debugPrint("======== 22 =========");
+        debugPrint(message);
         return _IncomingMessage(
           sender: 'Node 0x${nestedM2.fromAddr}',
           text: nestedM2.text,
         );
       }
-      return _IncomingMessage(sender: pipeGroup.senderName, text: pipeGroup.text);
+      return _IncomingMessage(
+        sender: pipeGroup.senderName,
+        text: pipeGroup.text,
+      );
     }
 
     if (RegExp(r'^\d+\|41\|', caseSensitive: false).hasMatch(message)) {
@@ -351,7 +363,7 @@ class MessageBackgroundService {
       r'^From 0x([0-9A-Fa-f]{2,4})\s*:\s*(.+)$',
       caseSensitive: false,
     ).firstMatch(message);
-    
+
     if (tagged != null) {
       var fromHex = (tagged.group(1) ?? '').toUpperCase();
       final taggedPayload = (tagged.group(2) ?? '').trim();
@@ -362,6 +374,8 @@ class MessageBackgroundService {
       if (embeddedGroup != null) {
         final innerNested = _parsePipeDirectMessage2(embeddedGroup.text);
         if (innerNested != null) {
+          debugPrint("======== 33 =========");
+          debugPrint(message);
           return _IncomingMessage(
             sender: 'Node 0x${innerNested.fromAddr}',
             text: innerNested.text,
@@ -375,6 +389,8 @@ class MessageBackgroundService {
 
       final parsedTagged = _splitSenderFromPayload(taggedPayload);
       if (parsedTagged.text.isEmpty) return null;
+      debugPrint("======== 44 =========");
+      debugPrint(message);
       return _IncomingMessage(
         sender: parsedTagged.senderName ?? 'Node 0x$fromHex',
         text: parsedTagged.text,
@@ -383,6 +399,8 @@ class MessageBackgroundService {
 
     final pipeDirect = _parsePipeDirectMessage(message);
     if (pipeDirect != null) {
+      debugPrint("========55 =========");
+      debugPrint(message);
       return _IncomingMessage(
         sender: 'Node 0x${pipeDirect.fromAddr}',
         text: pipeDirect.text,
@@ -404,7 +422,8 @@ class MessageBackgroundService {
   static String _sanitizeIncomingText(String raw) {
     var text = raw.trim();
     text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
-    text = text.replaceFirst(RegExp(r'[^\x20-\x7E]+$'), '').trimRight();
+    // Preserve UTF-8 message content (Khmer, emoji, etc.); remove only wire noise.
+    text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
     return text;
   }
 
@@ -432,7 +451,7 @@ class MessageBackgroundService {
   }
 
   static ({String fromAddr, String toAddr, String text})?
-      _parsePipeDirectMessage(String raw) {
+  _parsePipeDirectMessage(String raw) {
     final parts = raw.split('|').map((e) => e.trim()).toList();
     if (parts.length < 3) return null;
     final fromAddr = _normalizeAddress(parts[0]);
@@ -442,11 +461,41 @@ class MessageBackgroundService {
     return (fromAddr: fromAddr, toAddr: toAddr, text: text);
   }
 
-  static ({String msgId, String fromAddr, String toAddr, String text})?
-    _parsePipeDirectMessage2(String raw) {
+  static ({String fromAddr, String toAddr, String text})?
+  _parseRelayDirectMessage(String raw) {
     final parts = raw.split('|').map((e) => e.trim()).toList();
-    
-    final msg2Index = parts.indexWhere((e) => e.toUpperCase() == 'MSG2');
+    if (parts.length < 6 ||
+        parts[0].toUpperCase() != 'RELAY' ||
+        parts[2].toUpperCase() != 'MSG') {
+      return null;
+    }
+
+    // Relayed legacy frames may append `R` to the source node address.
+    final fromMatch = RegExp(
+      r'^([0-9A-Fa-f]{2,4})R?$',
+      caseSensitive: false,
+    ).firstMatch(parts[3]);
+    if (fromMatch == null) return null;
+
+    final fromAddr = _normalizeAddress(parts[4]);
+    final toAddr = _normalizeAddress(parts[1]);
+    final text = _sanitizeIncomingText(parts.sublist(5).join('|'));
+    if (fromAddr.isEmpty || toAddr.isEmpty || text.isEmpty) return null;
+    return (fromAddr: fromAddr, toAddr: toAddr, text: text);
+  }
+
+  static ({String msgId, String fromAddr, String toAddr, String text})?
+  _parsePipeDirectMessage2(String raw) {
+    final parts = raw.split('|').map((e) => e.trim()).toList();
+    debugPrint("======== RAW ============");
+    debugPrint(raw);
+    debugPrint("====================");
+    final msg2Index = parts.indexWhere(
+      (e) =>
+          e.toUpperCase() == 'MSG' ||
+          e.toUpperCase() == 'MSG2' ||
+          e.toUpperCase() == 'MSG3',
+    );
     if (msg2Index == -1 || parts.length < msg2Index + 5) return null;
 
     final msgId = parts[msg2Index + 1].trim();
@@ -458,16 +507,17 @@ class MessageBackgroundService {
       return null;
     }
 
-    return (
-      msgId: msgId,
-      fromAddr: fromAddr,
-      toAddr: toAddr,
-      text: text,
-    );
+    return (msgId: msgId, fromAddr: fromAddr, toAddr: toAddr, text: text);
   }
 
-  static ({String fromAddr, int groupId, String senderName, String senderAddr, String text})?
-      _parsePipeGroupMessage(String raw) {
+  static ({
+    String fromAddr,
+    int groupId,
+    String senderName,
+    String senderAddr,
+    String text,
+  })?
+  _parsePipeGroupMessage(String raw) {
     final parts = raw.split('|').map((e) => e.trim()).toList();
     String fromAddr = '';
     String groupToken = '';
@@ -488,7 +538,9 @@ class MessageBackgroundService {
     if (groupToken.trim().isEmpty) return null;
     if (payload.isEmpty) return null;
 
-    final senderMatch = RegExp(r'^([^&:|]+)&([0-9A-Fa-f]{2,8})\s*:\s*(.+)$').firstMatch(payload);
+    final senderMatch = RegExp(
+      r'^([^&:|]+)&([0-9A-Fa-f]{2,8})\s*:\s*(.+)$',
+    ).firstMatch(payload);
     if (senderMatch == null) return null;
 
     final senderName = (senderMatch.group(1) ?? '').trim();
@@ -571,7 +623,9 @@ class MessageBackgroundService {
       final g = _parsePipeGroupMessage(blob);
       if (g != null) {
         final uuid = _groupTokenFromWire(blob);
-        if (uuid != null && uuid.isNotEmpty && (myAddr.isEmpty || g.senderAddr != myAddr)) {
+        if (uuid != null &&
+            uuid.isNotEmpty &&
+            (myAddr.isEmpty || g.senderAddr != myAddr)) {
           await ChatUnreadDotService.markGroupUnread(uuid);
         }
         return;
@@ -588,7 +642,9 @@ class MessageBackgroundService {
       }
     }
 
-    if (taggedFromHex != null && taggedFromHex.isNotEmpty && (myAddr.isEmpty || taggedFromHex != myAddr)) {
+    if (taggedFromHex != null &&
+        taggedFromHex.isNotEmpty &&
+        (myAddr.isEmpty || taggedFromHex != myAddr)) {
       await ChatUnreadDotService.markDirectUnread(taggedFromHex);
     }
   }
@@ -610,13 +666,56 @@ class MessageBackgroundService {
   static Future<void> _persistIncomingMessage(String raw) async {
     final prefs = await SharedPreferences.getInstance();
     final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
-    
+
     if (!saveDbEnabled) return;
     if (_isIgnoredStatusNoise(raw)) return;
 
     await LocalDatabaseService.instance.ensureInitialized();
     final selfContactId = await _ensureSelfContact();
-    final myAddr = _normalizeAddress((prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim());
+    final myAddr = _normalizeAddress(
+      (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
+    );
+
+    final relayDirect = _parseRelayDirectMessage(raw);
+    debugPrint("========== relayDirect =========");
+    debugPrint(relayDirect.toString());
+    if (relayDirect != null) {
+      final fromContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: relayDirect.fromAddr,
+          displayName: 'Node 0x${relayDirect.fromAddr}',
+        ),
+      );
+      final toContactId = await LocalDatabaseService.instance.upsertContact(
+        ContactRecord(
+          loraAddress: relayDirect.toAddr,
+          displayName: relayDirect.toAddr == myAddr
+              ? 'You'
+              : 'Node 0x${relayDirect.toAddr}',
+        ),
+      );
+      final isDuplicate = await LocalDatabaseService.instance
+          .hasRecentDuplicateIncomingMessage(
+            chatType: ChatType.direct,
+            fromContactId: fromContactId,
+            toContactId: toContactId,
+            payload: relayDirect.text,
+          );
+      if (!isDuplicate) {
+        await LocalDatabaseService.instance.insertMessage(
+          MessageRecord(
+            messageUuid: _newMessageUuid('relay_dm'),
+            chatType: ChatType.direct,
+            fromContactId: fromContactId.toString(),
+            toContactId: toContactId.toString(),
+            payload: relayDirect.text,
+            deliveryStatus: DeliveryStatus.delivered,
+            receivedAt: DateTime.now().toUtc().toIso8601String(),
+          ),
+        );
+      }
+      return;
+    }
 
     final pipeDirect2 = _parsePipeDirectMessage2(raw);
     if (pipeDirect2 != null) {
@@ -629,7 +728,7 @@ class MessageBackgroundService {
       final nestedM2 = _parsePipeDirectMessage2(groupCheck.text);
       if (nestedM2 != null) {
         await _saveDirectMsg2ToDatabase(nestedM2, myAddr);
-        return; 
+        return;
       }
     }
 
@@ -655,19 +754,20 @@ class MessageBackgroundService {
           ? null
           : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
       if (groupDbId == null) return;
-      
+
       final fromContactId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
           loraAddress: groupCheck.senderAddr,
           displayName: groupCheck.senderName,
         ),
       );
-      final isDuplicate = await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
-        chatType: ChatType.group,
-        fromContactId: fromContactId,
-        groupId: groupDbId,
-        payload: groupCheck.text,
-      );
+      final isDuplicate = await LocalDatabaseService.instance
+          .hasRecentDuplicateIncomingMessage(
+            chatType: ChatType.group,
+            fromContactId: fromContactId,
+            groupId: groupDbId,
+            payload: groupCheck.text,
+          );
       if (!isDuplicate) {
         await LocalDatabaseService.instance.insertMessage(
           MessageRecord(
@@ -696,15 +796,18 @@ class MessageBackgroundService {
       final toContactId = await LocalDatabaseService.instance.upsertContact(
         ContactRecord(
           loraAddress: pipeDirect.toAddr,
-          displayName: pipeDirect.toAddr == myAddr ? 'You' : 'Node 0x${pipeDirect.toAddr}',
+          displayName: pipeDirect.toAddr == myAddr
+              ? 'You'
+              : 'Node 0x${pipeDirect.toAddr}',
         ),
       );
-      final isDuplicate = await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
-        chatType: ChatType.direct,
-        fromContactId: fromContactId,
-        toContactId: toContactId,
-        payload: pipeDirect.text,
-      );
+      final isDuplicate = await LocalDatabaseService.instance
+          .hasRecentDuplicateIncomingMessage(
+            chatType: ChatType.direct,
+            fromContactId: fromContactId,
+            toContactId: toContactId,
+            payload: pipeDirect.text,
+          );
       if (!isDuplicate) {
         await LocalDatabaseService.instance.insertMessage(
           MessageRecord(
@@ -782,12 +885,13 @@ class MessageBackgroundService {
       ),
     );
 
-    final isDuplicate = await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
-      chatType: ChatType.direct,
-      fromContactId: fromContactId,
-      toContactId: toContactId,
-      payload: data.text,
-    );
+    final isDuplicate = await LocalDatabaseService.instance
+        .hasRecentDuplicateIncomingMessage(
+          chatType: ChatType.direct,
+          fromContactId: fromContactId,
+          toContactId: toContactId,
+          payload: data.text,
+        );
 
     if (!isDuplicate) {
       await LocalDatabaseService.instance.insertMessage(
@@ -801,7 +905,9 @@ class MessageBackgroundService {
           receivedAt: DateTime.now().toUtc().toIso8601String(),
         ),
       );
-      debugPrint('MSG2 ROUTED TO DIRECT SUCCESSFULLY: ${data.fromAddr} -> ${data.toAddr} : ${data.text}');
+      debugPrint(
+        'MSG2 ROUTED TO DIRECT SUCCESSFULLY: ${data.fromAddr} -> ${data.toAddr} : ${data.text}',
+      );
     }
   }
 
@@ -856,7 +962,8 @@ class MessageBackgroundService {
     required String body,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-    final soundEnabled = prefs.getBool(_notificationSoundEnabledPrefKey) ?? true;
+    final soundEnabled =
+        prefs.getBool(_notificationSoundEnabledPrefKey) ?? true;
     final channel = soundEnabled ? _soundChannel : _silentChannel;
 
     final details = NotificationDetails(
@@ -892,42 +999,36 @@ class MessageBackgroundService {
     );
     await _notifications.initialize(initSettings);
 
-    final androidPlugin =
-        _notifications.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
+    final androidPlugin = _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
     await androidPlugin?.createNotificationChannel(_soundChannel);
     await androidPlugin?.createNotificationChannel(_silentChannel);
   }
 
   static Future<void> _requestNotificationPermissionIfNeeded() async {
-    final androidPlugin =
-        _notifications.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
+    final androidPlugin = _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
     await androidPlugin?.requestNotificationsPermission();
 
-    final iosPlugin =
-        _notifications.resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>();
-    await iosPlugin?.requestPermissions(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
+    final iosPlugin = _notifications
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >();
+    await iosPlugin?.requestPermissions(alert: true, badge: true, sound: true);
 
-    final macPlugin =
-        _notifications.resolvePlatformSpecificImplementation<
-            MacOSFlutterLocalNotificationsPlugin>();
-    await macPlugin?.requestPermissions(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
+    final macPlugin = _notifications
+        .resolvePlatformSpecificImplementation<
+          MacOSFlutterLocalNotificationsPlugin
+        >();
+    await macPlugin?.requestPermissions(alert: true, badge: true, sound: true);
   }
 
   static Future<void> _registerBackgroundPollingTask() async {
-    await Workmanager().initialize(
-      messageBackgroundCallbackDispatcher,
-    );
+    await Workmanager().initialize(messageBackgroundCallbackDispatcher);
 
     await Workmanager().registerPeriodicTask(
       _backgroundTaskUniqueName,
@@ -935,9 +1036,7 @@ class MessageBackgroundService {
       frequency: const Duration(minutes: 15),
       initialDelay: const Duration(minutes: 1),
       existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
-      constraints: Constraints(
-        networkType: NetworkType.connected,
-      ),
+      constraints: Constraints(networkType: NetworkType.connected),
     );
   }
 
@@ -952,10 +1051,7 @@ class MessageBackgroundService {
 }
 
 class _IncomingMessage {
-  const _IncomingMessage({
-    required this.sender,
-    required this.text,
-  });
+  const _IncomingMessage({required this.sender, required this.text});
 
   final String sender;
   final String text;

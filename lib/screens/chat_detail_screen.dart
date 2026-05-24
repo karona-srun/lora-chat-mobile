@@ -37,8 +37,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   bool _saveDatabaseLocallyEnabled = false;
   String _powerMode = 'powerModeBalanced';
 
-  int get _maxMessageLength =>
-      _powerMode == 'powerModeBalanced' ? 100 : 50;
+  int get _maxMessageLength => _powerMode == 'powerModeBalanced' ? 100 : 50;
   final List<ChatMessage> _messages = [];
   String deviceIp = ''; // Loaded from SharedPreferences
   String devicePort = ''; // Loaded from SharedPreferences
@@ -57,13 +56,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     // Add a welcome message
-    _messages.add(ChatMessage(
-      text:
-          'Connect to a LoRa node (saved IP/port), then send via /send. ',
-      sender: 'System',
-      timestamp: DateTime.now(),
-      isSystem: true,
-    ));
+    _messages.add(
+      ChatMessage(
+        text: 'Connect to a LoRa node (saved IP/port), then send via /send. ',
+        sender: 'System',
+        timestamp: DateTime.now(),
+        isSystem: true,
+      ),
+    );
     // Load saved connection settings from shared preferences
     _loadConnectionPrefs();
 
@@ -117,10 +117,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       if (!mounted) return;
 
       setState(() {
-        deviceIp =
-            (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
-        devicePort =
-            (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
+        deviceIp = (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
+        devicePort = (savedPort != null && savedPort.isNotEmpty)
+            ? savedPort
+            : '';
         _isConnected = deviceIp.isNotEmpty;
         _saveDatabaseLocallyEnabled = saveDbEnabled;
         if (storedPowerMode != null && storedPowerMode.isNotEmpty) {
@@ -128,8 +128,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         }
         _lastRxText = lastReceivedText;
         _lastRxReceivedCount = lastReceivedCount;
-        _currentMessageLength =
-            _currentMessageLength.clamp(0, _maxMessageLength);
+        _currentMessageLength = _currentMessageLength.clamp(
+          0,
+          _maxMessageLength,
+        );
       });
       await _initializeDirectChatPersistence();
     } catch (e) {
@@ -225,7 +227,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       final existingTargetId = await _resolveTargetContactIdFromDb(
         normalizedTarget: normalizedTarget,
       );
-      final targetId = existingTargetId ??
+      final targetId =
+          existingTargetId ??
           await LocalDatabaseService.instance.upsertContact(
             ContactRecord(
               loraAddress: normalizedTarget,
@@ -260,7 +263,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       debugPrint('targetId: $targetId');
       debugPrint('records: ${records.length}');
 
-      debugPrint('records: ${records.map((record) => record.toMap()).toList()}');
+      debugPrint(
+        'records: ${records.map((record) => record.toMap()).toList()}',
+      );
 
       if (!mounted) return;
       setState(() {
@@ -272,7 +277,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
               final i = entry.key;
               final record = entry.value;
               _messageUuidByIndex[i] = record.messageUuid;
-              final isOutgoing = record.fromContactId == selfId.toString() && record.toContactId == targetId.toString();
+              final isOutgoing =
+                  record.fromContactId == selfId.toString() &&
+                  record.toContactId == targetId.toString();
               return ChatMessage(
                 text: record.payload,
                 sender: isOutgoing ? 'You' : widget.title,
@@ -285,7 +292,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         if (_messages.isEmpty) {
           _messages.add(
             ChatMessage(
-              text: 'Connect to a LoRa node (saved IP/port), then send via /send. ',
+              text:
+                  'Connect to a LoRa node (saved IP/port), then send via /send. ',
               sender: 'System',
               timestamp: DateTime.now(),
               isSystem: true,
@@ -348,9 +356,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       if (t.length == 2) return '00${t.padLeft(2, '0')}';
       if (t.length == 4) return t.padLeft(4, '0');
     }
-    final fromTitle =
-        RegExp(r'0x([0-9A-Fa-f]{2,4})', caseSensitive: false)
-            .firstMatch(widget.title);
+    final fromTitle = RegExp(
+      r'0x([0-9A-Fa-f]{2,4})',
+      caseSensitive: false,
+    ).firstMatch(widget.title);
     if (fromTitle != null) {
       var hex = (fromTitle.group(1) ?? '').toUpperCase();
       if (hex.length == 2) hex = '00$hex';
@@ -380,8 +389,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     var text = raw.trim();
     // Some firmwares prefix payloads with frame counters like `1|...`.
     text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
-    // Drop trailing non-ASCII homoglyph noise (e.g. repeated Greek letters).
-    text = text.replaceFirst(RegExp(r'[^\x20-\x7E]+$'), '').trimRight();
+    // Preserve UTF-8 message content (Khmer, emoji, etc.); remove only wire noise.
+    text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
     return text;
   }
 
@@ -415,8 +424,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       decodedRaw = jsonDecode(rawBody);
     } catch (_) {
       try {
-        decodedRaw =
-            jsonDecode(sanitizeJsonControlCharsInStrings(rawBody));
+        decodedRaw = jsonDecode(sanitizeJsonControlCharsInStrings(rawBody));
       } catch (e) {
         debugPrint('Failed to parse /api/status JSON: $e');
         return null;
@@ -455,13 +463,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     final fromId = int.tryParse(targetId ?? '');
     final toId = int.tryParse(selfId ?? '');
     if (fromId != null && toId != null) {
-      final isDup =
-          await LocalDatabaseService.instance.hasRecentDuplicateIncomingMessage(
-        chatType: ChatType.direct,
-        fromContactId: fromId,
-        toContactId: toId,
-        payload: text,
-      );
+      final isDup = await LocalDatabaseService.instance
+          .hasRecentDuplicateIncomingMessage(
+            chatType: ChatType.direct,
+            fromContactId: fromId,
+            toContactId: toId,
+            payload: text,
+          );
       if (isDup) return;
     }
     if (selfId != null && targetId != null) {
@@ -511,10 +519,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     if (!_isConnected || deviceIp.trim().isEmpty) return;
     try {
       final uri = _buildUri('/api/status');
-      final response = await http.get(uri).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw Exception('Connection timeout'),
-      );
+      final response = await http
+          .get(uri)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw Exception('Connection timeout'),
+          );
       if (response.statusCode != 200) return;
 
       final rawBody = _decodeResponseBody(response);
@@ -534,7 +544,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         _lastDbSyncedReceivedCount = currentReceivedCount;
         await _loadDirectMessagesFromDb();
       }
-      final isDuplicateByTextAndCount = lastRx == _lastRxText &&
+      final isDuplicateByTextAndCount =
+          lastRx == _lastRxText &&
           currentReceivedCount != null &&
           _lastRxReceivedCount != null &&
           currentReceivedCount == _lastRxReceivedCount;
@@ -576,8 +587,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         final text = _sanitizeIncomingTextRelay(relayPayload);
         if (text.isEmpty) return;
         final target = _targetHex;
-        if (target != null &&
-            destHex.toUpperCase() != target.toUpperCase()) {
+        if (target != null && destHex.toUpperCase() != target.toUpperCase()) {
           return;
         }
 
@@ -593,24 +603,28 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       if (msgRelay2 != null) {
         final msgPayload = (msgRelay2.group(6) ?? '').trim();
         if (_isGroupTrafficFrame(msgPayload)) return;
-        final srcNorm =
-            _normalizeNodeHex((msgRelay2.group(1) ?? '').toUpperCase());
-        final destNorm =
-            _normalizeNodeHex((msgRelay2.group(2) ?? '').toUpperCase());
-        final src2Norm =
-            _normalizeNodeHex((msgRelay2.group(3) ?? '').toUpperCase());
-        final dest2Norm =
-            _normalizeNodeHex((msgRelay2.group(4) ?? '').toUpperCase());
+        final srcNorm = _normalizeNodeHex(
+          (msgRelay2.group(1) ?? '').toUpperCase(),
+        );
+        final destNorm = _normalizeNodeHex(
+          (msgRelay2.group(2) ?? '').toUpperCase(),
+        );
+        final src2Norm = _normalizeNodeHex(
+          (msgRelay2.group(3) ?? '').toUpperCase(),
+        );
+        final dest2Norm = _normalizeNodeHex(
+          (msgRelay2.group(4) ?? '').toUpperCase(),
+        );
         final text = _sanitizeIncomingTextRelay(msgPayload);
         if (text.isEmpty) return;
         final target = _targetHex;
-        if (target != null &&
-            destNorm.toUpperCase() != target.toUpperCase()) {
+        if (target != null && destNorm.toUpperCase() != target.toUpperCase()) {
           return;
         }
         await _appendIncomingDirectMessage(
           text: text,
-          sender: 'Via relay $srcNorm -> 0x$destNorm -> 0x$src2Norm -> 0x$dest2Norm',
+          sender:
+              'Via relay $srcNorm -> 0x$destNorm -> 0x$src2Norm -> 0x$dest2Norm',
         );
         return;
       }
@@ -620,15 +634,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       if (msgRelay != null) {
         final msgPayload = (msgRelay.group(3) ?? '').trim();
         if (_isGroupTrafficFrame(msgPayload)) return;
-        final srcNorm =
-            _normalizeNodeHex((msgRelay.group(1) ?? '').toUpperCase());
-        final destNorm =
-            _normalizeNodeHex((msgRelay.group(2) ?? '').toUpperCase());
+        final srcNorm = _normalizeNodeHex(
+          (msgRelay.group(1) ?? '').toUpperCase(),
+        );
+        final destNorm = _normalizeNodeHex(
+          (msgRelay.group(2) ?? '').toUpperCase(),
+        );
         final text = _sanitizeIncomingTextRelay(msgPayload);
         if (text.isEmpty) return;
         final target = _targetHex;
-        if (target != null &&
-            destNorm.toUpperCase() != target.toUpperCase()) {
+        if (target != null && destNorm.toUpperCase() != target.toUpperCase()) {
           return;
         }
 
@@ -709,26 +724,40 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       if (target != null && target.isNotEmpty) {
         query['to'] = target;
       }
-      
+
       final uri = _buildUri('/send', query);
-      final response = await http.get(uri).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw Exception('Connection timeout'),
-      );
+      final response = await http
+          .get(uri)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw Exception('Connection timeout'),
+          );
       final body = _decodeResponseBody(response).trim();
 
       if (response.statusCode == 200) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.acked);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.acked,
+        );
       } else if (response.statusCode == 504 ||
           body.toUpperCase().contains('NO ACK') ||
           body.toUpperCase().contains('TIMEOUT')) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.noAck,
+        );
       } else {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.failed,
+        );
         throw Exception('Server returned: ${response.statusCode} - $body');
       }
     } catch (e) {
-      _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+      _updateOutgoingDeliveryStatus(
+        outgoingIndex,
+        MessageDeliveryStatus.failed,
+      );
       if (!mounted) return;
       // ScaffoldMessenger.of(context).showSnackBar(
       //   SnackBar(
@@ -796,10 +825,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       }
 
       final uri = _buildUri('/send', query);
-      final response = await http.get(uri).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw Exception('Connection timeout'),
-      );
+      final response = await http
+          .get(uri)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw Exception('Connection timeout'),
+          );
       final body = _decodeResponseBody(response).trim();
 
       if (response.statusCode == 200) {
@@ -881,16 +912,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     } catch (e) {
       debugPrint('Failed to delete chat history: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to delete history: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to delete history: $e')));
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final targetLabel =
-        _targetHex == null ? 'Device default' : '0x$_targetHex';
+    final targetLabel = _targetHex == null ? 'Device default' : '0x$_targetHex';
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
@@ -899,16 +929,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
           Row(
             children: [
               Icon(
-              Icons.wifi_tethering,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-            const SizedBox(width: 3),
-            Text(targetLabel,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w400,
-            ),
-            ),
+                Icons.wifi_tethering,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 3),
+              Text(
+                targetLabel,
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w400),
+              ),
             ],
           ),
           const SizedBox(width: 5),
@@ -974,8 +1002,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                               actions: [
                                 ContextMenuAndroid(
                                   icon: Icons.refresh,
-                                  label: AppLocalizations.of(context).tr('resend'),
-                                  onTap: () => unawaited(_resendMessageAt(index)),
+                                  label: AppLocalizations.of(
+                                    context,
+                                  ).tr('resend'),
+                                  onTap: () =>
+                                      unawaited(_resendMessageAt(index)),
                                 ),
                               ],
                             ),
@@ -1001,8 +1032,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
             child: SafeArea(
               top: false,
               child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 22, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 22,
+                  vertical: 8,
+                ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1010,18 +1043,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                     Row(
                       children: [
                         // Message input
-
                         Expanded(
                           child: Container(
                             decoration: BoxDecoration(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .surfaceVariant
-                                  .withOpacity(0.9),
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.surfaceVariant.withOpacity(0.9),
                               borderRadius: BorderRadius.circular(10),
                             ),
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 12),
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
                             child: TextField(
                               controller: _messageController,
                               decoration: const InputDecoration(
@@ -1032,12 +1062,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                               maxLines: 4,
                               minLines: 1,
                               maxLength: _maxMessageLength,
-                              textCapitalization:
-                                  TextCapitalization.sentences,
+                              textCapitalization: TextCapitalization.sentences,
                               onChanged: (value) {
                                 setState(() {
-                                  _currentMessageLength =
-                                      value.length.clamp(0, _maxMessageLength);
+                                  _currentMessageLength = value.length.clamp(
+                                    0,
+                                    _maxMessageLength,
+                                  );
                                 });
                               },
                               onSubmitted: (_) => _sendMessage(),
@@ -1071,11 +1102,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                       child: Text(
                         '$_currentMessageLength / $_maxMessageLength',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              fontSize: 11,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
+                          fontSize: 11,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
                   ],
@@ -1095,4 +1124,3 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     unawaited(_initializeDirectChatPersistence());
   }
 }
-

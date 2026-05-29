@@ -604,18 +604,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: Text(l10n.tr('appVersion')),
             subtitle: const Text('0.0.1', style: TextStyle(fontSize: 12)),
           ),
-          ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            leading: const Icon(Icons.help, size: 20),
-            title: Text(l10n.tr('helpSupport')),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: () {
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(SnackBar(content: Text(l10n.tr('helpSupport'))));
-            },
-          ),
+          // ListTile(
+          //   dense: true,
+          //   visualDensity: VisualDensity.compact,
+          //   leading: const Icon(Icons.help, size: 20),
+          //   title: Text(l10n.tr('helpSupport')),
+          //   trailing: const Icon(Icons.chevron_right, size: 18),
+          //   onTap: () {
+          //     ScaffoldMessenger.of(
+          //       context,
+          //     ).showSnackBar(SnackBar(content: Text(l10n.tr('helpSupport'))));
+          //   },
+          // ),
         ],
       ),
     );

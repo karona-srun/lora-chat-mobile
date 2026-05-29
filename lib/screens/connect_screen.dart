@@ -695,8 +695,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   style: TextStyle(fontSize: 13),
                 ),
                 onTap: () {
-                  Navigator.pop(context);
-                  _connectViaBluetooth(context);
+                  // Navigator.pop(context);
+                  // _connectViaBluetooth(context);
                 },
               ),
               const SizedBox(height: 8),

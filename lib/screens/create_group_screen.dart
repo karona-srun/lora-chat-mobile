@@ -187,7 +187,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
       if (mounted) {
         setState(() => _isLoading = false);
       }
-    }
+    } 
   }
 
   Future<void> _createGroup() async {

@@ -125,8 +125,6 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
     );
   }
 
-
-
   @override
   void dispose() {
     _unreadPollTimer?.cancel();
@@ -138,7 +136,8 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
     try {
       final next = await ChatUnreadDotService.directUnreadSet();
       if (!mounted) return;
-      final same = next.length == _unreadDirectAddrs.length &&
+      final same =
+          next.length == _unreadDirectAddrs.length &&
           next.every(_unreadDirectAddrs.contains);
       if (same) return;
       setState(() => _unreadDirectAddrs = next);
@@ -286,7 +285,9 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
         }
       }
 
-      await _saveContactsToLocal(parsed);
+      await _saveContactsToLocal(
+        parsed.where((node) => !_removedAddrs.contains(node.addr)).toList(),
+      );
 
       for (final node in parsed) {
         mergedByAddr[node.addr] = node;
@@ -335,12 +336,8 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
     if (confirmed != true) return;
 
     try {
-      final db = await LocalDatabaseService.instance.database;
-      await db.delete(
-        'contacts',
-        where: 'lora_address = ?',
-        whereArgs: [node.addr],
-      );
+      await LocalDatabaseService.instance.removeContactByLoraAddress(node.addr);
+      await ChatUnreadDotService.clearDirectUnread(node.addr);
       _removedAddrs.add(node.addr);
       if (!mounted) return;
       await _refresh();
@@ -431,11 +428,11 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
     final muted = theme.colorScheme.onSurfaceVariant;
     const mint = Color(0xFFD4F5E8);
     const moonCircle = Color(0xFFFFE8CC);
+    final networkSummary = _networkSummary(node);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-      shape: 
-      RoundedRectangleBorder(
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
         side: BorderSide(color: Colors.grey),
       ),
@@ -445,8 +442,11 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
         onTap: () {
           Navigator.of(context).push(
             MaterialPageRoute(
-              builder: (_) =>
-                  ChatDetailScreen(title: node.name, targetNodeId: node.addr, selfContactId: _selfContactId),
+              builder: (_) => ChatDetailScreen(
+                title: node.name,
+                targetNodeId: node.addr,
+                selfContactId: _selfContactId,
+              ),
             ),
           );
         },
@@ -600,18 +600,18 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
                           text: _formatNodeLastSeen(node),
                           mutedColor: muted,
                         ),
-                        // if (_networkSummary(node).isNotEmpty) ...[
-                        //   const SizedBox(height: 4),
-                        //   _meshMetaRow(
-                        //     leading: Icon(
-                        //       Icons.hub_outlined,
-                        //       size: 16,
-                        //       color: muted,
-                        //     ),
-                        //     text: _networkSummary(node),
-                        //     mutedColor: muted,
-                        //   ),
-                        // ],
+                        if (networkSummary.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          _meshMetaRow(
+                            leading: Icon(
+                              Icons.hub_outlined,
+                              size: 16,
+                              color: muted,
+                            ),
+                            text: networkSummary,
+                            mutedColor: muted,
+                          ),
+                        ],
                         const SizedBox(height: 4),
                         _meshMetaRow(
                           leading: Icon(
@@ -793,7 +793,7 @@ class _ContactsListScreenState extends State<ContactsListScreen> {
                             vertical: 0,
                           ),
                           itemCount: filtered.length,
-                          separatorBuilder: (_, __) => const SizedBox.shrink(),
+                          separatorBuilder: (_, _) => const SizedBox.shrink(),
                           itemBuilder: (context, index) {
                             final node = filtered[index];
                             return _buildContactCard(context, node);

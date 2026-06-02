@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:context_menu_android/features/context_menu/data/models/context_menu.dart';
@@ -796,6 +797,19 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         s == MessageDeliveryStatus.noAck;
   }
 
+  Future<void> _copyMessageText(ChatMessage message) async {
+    final text = message.text;
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(MaterialLocalizations.of(context).copyButtonLabel),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
   Future<void> _resendMessageAt(int index) async {
     if (index < 0 || index >= _messages.length) return;
     final message = _messages[index];
@@ -990,25 +1004,31 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                     itemBuilder: (context, index) {
                       final message = _messages[index];
                       final bubble = ChatBubble(message: message);
-                      if (!_canResendMessage(message)) {
-                        return bubble;
-                      }
                       return GestureDetector(
                         onLongPress: () {
                           showDialog<void>(
                             context: context,
                             builder: (_) => IosStyleContextMenu(
-                              child: bubble,
                               actions: [
                                 ContextMenuAndroid(
-                                  icon: Icons.refresh,
-                                  label: AppLocalizations.of(
+                                  icon: Icons.copy,
+                                  label: MaterialLocalizations.of(
                                     context,
-                                  ).tr('resend'),
+                                  ).copyButtonLabel,
                                   onTap: () =>
-                                      unawaited(_resendMessageAt(index)),
+                                      unawaited(_copyMessageText(message)),
                                 ),
+                                if (_canResendMessage(message))
+                                  ContextMenuAndroid(
+                                    icon: Icons.refresh,
+                                    label: AppLocalizations.of(
+                                      context,
+                                    ).tr('resend'),
+                                    onTap: () =>
+                                        unawaited(_resendMessageAt(index)),
+                                  ),
                               ],
+                              child: bubble,
                             ),
                           );
                         },
@@ -1075,7 +1095,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                             ),
                           ),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 6),
                         // Send button
                         SizedBox(
                           height: 44,

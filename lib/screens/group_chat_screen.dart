@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:context_menu_android/features/context_menu/data/models/context_menu.dart';
 import 'package:context_menu_android/features/context_menu/presentation/widget/ios_style_context_menu.dart';
@@ -579,7 +580,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
       final traffic = _trafficFromStatus(decodedRaw);
       final lastRx = traffic['lastReceived']?.toString().trim() ?? '';
-      
+
       if (lastRx.isEmpty) return;
       final currentReceivedCount = int.tryParse(
         (traffic['received'] ?? '').toString(),
@@ -799,7 +800,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _fetchMessagesInFlight = false;
     }
   }
- 
+
   void _scrollToBottom() {
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
@@ -1039,6 +1040,19 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         s == MessageDeliveryStatus.noAck;
   }
 
+  Future<void> _copyMessageText(ChatMessage message) async {
+    final text = message.text;
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(MaterialLocalizations.of(context).copyButtonLabel),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
   Future<void> _resendMessageAt(int index) async {
     if (index < 0 || index >= _messages.length) return;
     final message = _messages[index];
@@ -1221,9 +1235,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       itemCount: _messages.length,
                       itemBuilder: (context, index) {
                         final message = _messages[index];
-                        if (!_canResendMessage(message)) {
-                          return ChatBubble(message: message);
-                        }
+                        final bubble = ChatBubble(message: message);
                         return GestureDetector(
                           onLongPress: () {
                             showDialog<void>(
@@ -1231,16 +1243,28 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                               builder: (_) => IosStyleContextMenu(
                                 actions: [
                                   ContextMenuAndroid(
-                                    icon: Icons.refresh,
-                                    label: AppLocalizations.of(context).tr('resend'),
-                                    onTap: () => unawaited(_resendMessageAt(index)),
+                                    icon: Icons.copy,
+                                    label: MaterialLocalizations.of(
+                                      context,
+                                    ).copyButtonLabel,
+                                    onTap: () =>
+                                        unawaited(_copyMessageText(message)),
                                   ),
+                                  if (_canResendMessage(message))
+                                    ContextMenuAndroid(
+                                      icon: Icons.refresh,
+                                      label: AppLocalizations.of(
+                                        context,
+                                      ).tr('resend'),
+                                      onTap: () =>
+                                          unawaited(_resendMessageAt(index)),
+                                    ),
                                 ],
-                                child: ChatBubble(message: message),
+                                child: bubble,
                               ),
                             );
                           },
-                          child: ChatBubble(message: message),
+                          child: bubble,
                         );
                       },
                     ),
@@ -1298,7 +1322,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 10),
+                          const SizedBox(width: 6),
                           SizedBox(
                             height: 44,
                             width: 44,

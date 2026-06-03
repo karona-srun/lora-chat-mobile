@@ -32,6 +32,7 @@ class MessageBackgroundService {
   static const String _lastReceivedTextPrefKey = 'message_last_received_text';
   static const String _lastReceivedCountPrefKey = 'message_last_received_count';
   static const String _groupsChangedAtPrefKey = 'groups_changed_at_ms';
+  static const String messageChangedAtMsKey = 'chat_messages_changed_at_ms';
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -157,6 +158,7 @@ class MessageBackgroundService {
       if (incoming == null) return;
 
       await _markUnreadDotsFromFrame(lastRx);
+      await _markMessagesChanged();
 
       if (!allowWhenForeground && _isAppInForeground) return;
 
@@ -702,7 +704,7 @@ class MessageBackgroundService {
             payload: relayDirect.text,
           );
       if (!isDuplicate) {
-        await LocalDatabaseService.instance.insertMessage(
+        final insertedId = await LocalDatabaseService.instance.insertMessage(
           MessageRecord(
             messageUuid: _newMessageUuid('relay_dm'),
             chatType: ChatType.direct,
@@ -713,6 +715,7 @@ class MessageBackgroundService {
             receivedAt: DateTime.now().toUtc().toIso8601String(),
           ),
         );
+        if (insertedId != null) await _markMessagesChanged();
       }
       return;
     }
@@ -769,7 +772,7 @@ class MessageBackgroundService {
             payload: groupCheck.text,
           );
       if (!isDuplicate) {
-        await LocalDatabaseService.instance.insertMessage(
+        final insertedId = await LocalDatabaseService.instance.insertMessage(
           MessageRecord(
             messageUuid: _newMessageUuid('grp_$groupDbId'),
             chatType: ChatType.group,
@@ -780,6 +783,7 @@ class MessageBackgroundService {
             receivedAt: DateTime.now().toUtc().toIso8601String(),
           ),
         );
+        if (insertedId != null) await _markMessagesChanged();
       }
       return;
     }
@@ -809,7 +813,7 @@ class MessageBackgroundService {
             payload: pipeDirect.text,
           );
       if (!isDuplicate) {
-        await LocalDatabaseService.instance.insertMessage(
+        final insertedId = await LocalDatabaseService.instance.insertMessage(
           MessageRecord(
             messageUuid: _newMessageUuid('dm'),
             chatType: ChatType.direct,
@@ -820,6 +824,7 @@ class MessageBackgroundService {
             receivedAt: DateTime.now().toUtc().toIso8601String(),
           ),
         );
+        if (insertedId != null) await _markMessagesChanged();
       }
       return;
     }
@@ -852,7 +857,7 @@ class MessageBackgroundService {
           displayName: parsed.senderName ?? 'Node 0x$fromAddr',
         ),
       );
-      await LocalDatabaseService.instance.insertMessage(
+      final insertedId = await LocalDatabaseService.instance.insertMessage(
         MessageRecord(
           messageUuid: _newMessageUuid('dm'),
           chatType: ChatType.direct,
@@ -863,6 +868,7 @@ class MessageBackgroundService {
           receivedAt: DateTime.now().toUtc().toIso8601String(),
         ),
       );
+      if (insertedId != null) await _markMessagesChanged();
       return;
     }
   }
@@ -894,7 +900,7 @@ class MessageBackgroundService {
         );
 
     if (!isDuplicate) {
-      await LocalDatabaseService.instance.insertMessage(
+      final insertedId = await LocalDatabaseService.instance.insertMessage(
         MessageRecord(
           messageUuid: 'msg_${data.msgId}',
           chatType: ChatType.direct,
@@ -905,6 +911,7 @@ class MessageBackgroundService {
           receivedAt: DateTime.now().toUtc().toIso8601String(),
         ),
       );
+      if (insertedId != null) await _markMessagesChanged();
       debugPrint(
         'MSG2 ROUTED TO DIRECT SUCCESSFULLY: ${data.fromAddr} -> ${data.toAddr} : ${data.text}',
       );
@@ -953,6 +960,14 @@ class MessageBackgroundService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(
       _groupsChangedAtPrefKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  static Future<void> _markMessagesChanged() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+      messageChangedAtMsKey,
       DateTime.now().millisecondsSinceEpoch,
     );
   }

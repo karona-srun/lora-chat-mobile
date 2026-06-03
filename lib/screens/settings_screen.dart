@@ -567,7 +567,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-          
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
             child: Text(
@@ -602,7 +601,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             visualDensity: VisualDensity.compact,
             leading: const Icon(Icons.info, size: 20),
             title: Text(l10n.tr('appVersion')),
-            subtitle: const Text('0.0.1', style: TextStyle(fontSize: 12)),
+            subtitle: const Text('0.0.18', style: TextStyle(fontSize: 12)),
           ),
           // ListTile(
           //   dense: true,

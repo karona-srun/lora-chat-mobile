@@ -10,6 +10,7 @@ import '../l10n/app_localizations.dart';
 import '../models/chat_message.dart';
 import '../services/local_database_service.dart';
 import '../services/chat_unread_dot_service.dart';
+import '../services/message_background_service.dart';
 import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
 
@@ -32,6 +33,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     with WidgetsBindingObserver {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
   static const String _powerModePrefKey = 'power_mode';
+  static const Duration _messagePollInterval = Duration(milliseconds: 800);
+  static const Duration _statusPollTimeout = Duration(seconds: 2);
+  static const Duration _sendTimeout = Duration(seconds: 12);
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isConnected = false;
@@ -43,6 +47,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   String deviceIp = ''; // Loaded from SharedPreferences
   String devicePort = ''; // Loaded from SharedPreferences
   Timer? _messagePollTimer;
+  Timer? _dbMessageSyncTimer;
   int _currentMessageLength = 0;
   String _lastRxText = '';
   int? _lastRxReceivedCount;
@@ -51,6 +56,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   String? _selfContactId;
   String? _targetContactId;
   final Map<int, String> _messageUuidByIndex = <int, String>{};
+  bool _fetchMessagesInFlight = false;
+  bool _suspendStatusPoll = false;
+  bool _dbMessageSyncInFlight = false;
+  int _lastObservedMessagesChangedAt = 0;
 
   @override
   void initState() {
@@ -70,8 +79,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
 
     // Start polling for incoming messages
     _messagePollTimer = Timer.periodic(
-      const Duration(milliseconds: 800),
+      _messagePollInterval,
       (_) => _fetchMessages(),
+    );
+    _dbMessageSyncTimer = Timer.periodic(
+      const Duration(milliseconds: 250),
+      (_) => unawaited(_refreshPersistedMessagesIfChanged()),
     );
     // And fetch once immediately
     _fetchMessages();
@@ -92,6 +105,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _messagePollTimer?.cancel();
+    _dbMessageSyncTimer?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -137,6 +151,36 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       await _initializeDirectChatPersistence();
     } catch (e) {
       debugPrint('Failed to load connection prefs: $e');
+    }
+  }
+
+  Future<void> _refreshPersistedMessagesIfChanged() async {
+    if (!mounted) return;
+    if (_dbMessageSyncInFlight) return;
+    _dbMessageSyncInFlight = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final changedAt =
+          prefs.getInt(MessageBackgroundService.messageChangedAtMsKey) ?? 0;
+      if (changedAt <= _lastObservedMessagesChangedAt) return;
+      _lastObservedMessagesChangedAt = changedAt;
+      if (_saveDatabaseLocallyEnabled &&
+          _selfContactId != null &&
+          _targetContactId != null) {
+        await _loadDirectMessagesFromDb();
+      } else {
+        await _fetchMessages();
+      }
+      final tid = widget.targetNodeId;
+      if (tid != null && tid.isNotEmpty) {
+        await ChatUnreadDotService.clearDirectUnread(
+          ChatUnreadDotService.normalizeAddr(tid),
+        );
+      }
+    } catch (e) {
+      debugPrint('Failed to refresh persisted direct messages: $e');
+    } finally {
+      _dbMessageSyncInFlight = false;
     }
   }
 
@@ -201,6 +245,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       case MessageDeliveryStatus.none:
         return DeliveryStatus.sent;
     }
+  }
+
+  MessageDeliveryStatus _toLoadedUiDeliveryStatus(
+    MessageRecord record, {
+    required bool isOutgoing,
+  }) {
+    if (isOutgoing && record.deliveryStatus == DeliveryStatus.pending) {
+      return MessageDeliveryStatus.failed;
+    }
+    return _toUiDeliveryStatus(record.deliveryStatus);
   }
 
   Future<void> _initializeDirectChatPersistence() async {
@@ -286,7 +340,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                 sender: isOutgoing ? 'You' : widget.title,
                 timestamp: _parseMessageTime(record),
                 isSystem: false,
-                deliveryStatus: _toUiDeliveryStatus(record.deliveryStatus),
+                deliveryStatus: _toLoadedUiDeliveryStatus(
+                  record,
+                  isOutgoing: isOutgoing,
+                ),
               );
             }),
           );
@@ -516,15 +573,32 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     caseSensitive: false,
   );
 
+  void _schedulePostSendPolls() {
+    const delays = <Duration>[
+      Duration(milliseconds: 250),
+      Duration(milliseconds: 1200),
+      Duration(milliseconds: 2500),
+    ];
+    for (final delay in delays) {
+      Future<void>.delayed(delay, () {
+        if (!mounted) return;
+        unawaited(_fetchMessages());
+      });
+    }
+  }
+
   Future<void> _fetchMessages() async {
     if (!_isConnected || deviceIp.trim().isEmpty) return;
+    if (_suspendStatusPoll) return;
+    if (_fetchMessagesInFlight) return;
+    _fetchMessagesInFlight = true;
     try {
       final uri = _buildUri('/api/status');
       final response = await http
           .get(uri)
           .timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => throw Exception('Connection timeout'),
+            _statusPollTimeout,
+            onTimeout: () => throw TimeoutException('/api/status'),
           );
       if (response.statusCode != 200) return;
 
@@ -665,6 +739,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       return;
     } catch (e) {
       debugPrint('Failed to fetch messages: $e');
+    } finally {
+      _fetchMessagesInFlight = false;
     }
   }
 
@@ -718,6 +794,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     _messageController.clear();
     _scrollToBottom();
 
+    _suspendStatusPoll = true;
     try {
       final target = _targetHex;
       // Firmware handleSend: /send?msg=... optional &to=AABB.
@@ -730,8 +807,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       final response = await http
           .get(uri)
           .timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => throw Exception('Connection timeout'),
+            _sendTimeout,
+            onTimeout: () => throw TimeoutException('/send'),
           );
       final body = _decodeResponseBody(response).trim();
 
@@ -754,6 +831,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         );
         throw Exception('Server returned: ${response.statusCode} - $body');
       }
+    } on TimeoutException catch (_) {
+      _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
     } catch (e) {
       _updateOutgoingDeliveryStatus(
         outgoingIndex,
@@ -766,22 +845,30 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       //     backgroundColor: Colors.red,
       //   ),
       // );
+    } finally {
+      _suspendStatusPoll = false;
+      _schedulePostSendPolls();
     }
   }
 
   void _updateOutgoingDeliveryStatus(int index, MessageDeliveryStatus status) {
-    if (!mounted || index < 0 || index >= _messages.length) return;
-    final current = _messages[index].deliveryStatus;
-    // Prevent late async callbacks from downgrading a confirmed ACK.
-    if (current == MessageDeliveryStatus.acked &&
-        status != MessageDeliveryStatus.acked) {
-      return;
-    }
-    setState(() {
-      _messages[index] = _messages[index].copyWith(deliveryStatus: status);
-    });
     final uuid = _messageUuidByIndex[index];
-    if (uuid == null) return;
+    var shouldPersist = uuid != null;
+
+    if (mounted && index >= 0 && index < _messages.length) {
+      final current = _messages[index].deliveryStatus;
+      // Prevent late async callbacks from downgrading a confirmed ACK.
+      if (current == MessageDeliveryStatus.acked &&
+          status != MessageDeliveryStatus.acked) {
+        shouldPersist = false;
+      } else {
+        setState(() {
+          _messages[index] = _messages[index].copyWith(deliveryStatus: status);
+        });
+      }
+    }
+
+    if (!shouldPersist || uuid == null) return;
     unawaited(
       LocalDatabaseService.instance.updateMessageDeliveryStatus(
         messageUuid: uuid,
@@ -831,6 +918,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
 
     _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.sending);
 
+    _suspendStatusPoll = true;
     try {
       final target = _targetHex;
       final query = <String, String>{'msg': messageText};
@@ -842,8 +930,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       final response = await http
           .get(uri)
           .timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => throw Exception('Connection timeout'),
+            _sendTimeout,
+            onTimeout: () => throw TimeoutException('/send'),
           );
       final body = _decodeResponseBody(response).trim();
 
@@ -860,6 +948,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
       _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.noAck);
     } catch (_) {
       _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.failed);
+    } finally {
+      _suspendStatusPoll = false;
+      _schedulePostSendPolls();
     }
   }
 

@@ -10,6 +10,7 @@ import 'group_details_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/local_database_service.dart';
 import '../services/chat_unread_dot_service.dart';
+import '../services/message_background_service.dart';
 import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
 import '../l10n/app_localizations.dart';
@@ -34,19 +35,23 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   static const String _saveDatabaseLocallyPrefKey = 'save_database_locally';
   static const String _powerModePrefKey = 'power_mode';
   static const String _groupsChangedAtPrefKey = 'groups_changed_at_ms';
+  static const Duration _messagePollInterval = Duration(milliseconds: 800);
+  static const Duration _statusPollTimeout = Duration(seconds: 2);
+  static const Duration _sendTimeout = Duration(seconds: 12);
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isConnected = false;
   bool _saveDatabaseLocallyEnabled = false;
   String _powerMode = 'powerModeBalanced';
 
-  int get _maxMessageLength =>
-      _powerMode == 'powerModeBalanced' ? 100 : 50;
+  int get _maxMessageLength => _powerMode == 'powerModeBalanced' ? 100 : 50;
   final List<ChatMessage> _messages = [];
-  List<GroupMemberContactRecord> _groupMembers = const <GroupMemberContactRecord>[];
+  List<GroupMemberContactRecord> _groupMembers =
+      const <GroupMemberContactRecord>[];
   String deviceIp = ''; // Loaded from SharedPreferences
   String devicePort = ''; // Loaded from SharedPreferences
   Timer? _messagePollTimer;
+  Timer? _dbMessageSyncTimer;
   List<String> _targetHexes = const <String>[];
   String _selfCallSign = '';
   String _selfAddr = '';
@@ -56,8 +61,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   int? _lastDbSyncedReceivedCount;
   int _currentMessageLength = 0;
   final Map<int, String> _messageUuidByIndex = <int, String>{};
+
   /// Avoid overlapping `/api/status` polls (timer can fire while a request is still in flight).
   bool _fetchMessagesInFlight = false;
+  bool _dbMessageSyncInFlight = false;
+
   /// LoRa firmware often cannot serve `/api/status` while handling `/send`; pause polling during outbound delivery.
   bool _suspendGroupStatusPoll = false;
   DateTime? _lastSoftAckAt;
@@ -65,6 +73,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   static const Duration _softAckMatchWindow = Duration(minutes: 2);
   Timer? _groupsSyncTimer;
   int _lastObservedGroupsChangedAt = 0;
+  int _lastObservedMessagesChangedAt = 0;
 
   @override
   void initState() {
@@ -80,8 +89,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _loadConnectionPrefs();
     _loadGroupMembers();
     _messagePollTimer = Timer.periodic(
-      const Duration(milliseconds: 800),
+      _messagePollInterval,
       (_) => _fetchMessages(),
+    );
+    _dbMessageSyncTimer = Timer.periodic(
+      const Duration(milliseconds: 250),
+      (_) => unawaited(_refreshPersistedMessagesIfChanged()),
     );
     _groupsSyncTimer = Timer.periodic(
       const Duration(seconds: 2),
@@ -122,8 +135,32 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     _messagePollTimer?.cancel();
+    _dbMessageSyncTimer?.cancel();
     _groupsSyncTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _refreshPersistedMessagesIfChanged() async {
+    if (!mounted) return;
+    if (_dbMessageSyncInFlight) return;
+    _dbMessageSyncInFlight = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final changedAt =
+          prefs.getInt(MessageBackgroundService.messageChangedAtMsKey) ?? 0;
+      if (changedAt <= _lastObservedMessagesChangedAt) return;
+      _lastObservedMessagesChangedAt = changedAt;
+      if (_saveDatabaseLocallyEnabled) {
+        await _loadGroupMessagesFromDb();
+      } else {
+        await _fetchMessages();
+      }
+      await ChatUnreadDotService.clearGroupUnread(widget.groupUuid);
+    } catch (e) {
+      debugPrint('Failed to refresh persisted group messages: $e');
+    } finally {
+      _dbMessageSyncInFlight = false;
+    }
   }
 
   Future<void> _refreshGroupRosterIfChanged() async {
@@ -157,7 +194,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       final savedPort = prefs.getString('device_port')?.trim();
       final saveDbEnabled = prefs.getBool(_saveDatabaseLocallyPrefKey) ?? false;
       final storedPowerMode = prefs.getString(_powerModePrefKey);
-      final myCallSign = (prefs.getString('callSign') ?? '').trim().toUpperCase();
+      final myCallSign = (prefs.getString('callSign') ?? '')
+          .trim()
+          .toUpperCase();
       final myAddr = _normalizeAddress(
         (prefs.getString('myAddr') ?? prefs.getString('my_addr') ?? '').trim(),
       );
@@ -165,10 +204,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (!mounted) return;
 
       setState(() {
-        deviceIp =
-            (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
-        devicePort =
-            (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
+        deviceIp = (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
+        devicePort = (savedPort != null && savedPort.isNotEmpty)
+            ? savedPort
+            : '';
         _isConnected = deviceIp.isNotEmpty;
         _saveDatabaseLocallyEnabled = saveDbEnabled;
         _selfCallSign = myCallSign;
@@ -176,8 +215,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         if (storedPowerMode != null && storedPowerMode.isNotEmpty) {
           _powerMode = storedPowerMode;
         }
-        _currentMessageLength =
-            _currentMessageLength.clamp(0, _maxMessageLength);
+        _currentMessageLength = _currentMessageLength.clamp(
+          0,
+          _maxMessageLength,
+        );
       });
       // Re-resolve targets now that self address / callsign are known.
       await _loadGroupMembers();
@@ -241,6 +282,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       case MessageDeliveryStatus.none:
         return DeliveryStatus.sent;
     }
+  }
+
+  MessageDeliveryStatus _toLoadedUiDeliveryStatus(
+    MessageRecord record, {
+    required bool isOutgoing,
+  }) {
+    if (isOutgoing && record.deliveryStatus == DeliveryStatus.pending) {
+      return MessageDeliveryStatus.failed;
+    }
+    return _toUiDeliveryStatus(record.deliveryStatus);
   }
 
   Future<void> _ensureSelfContact() async {
@@ -309,19 +360,28 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               final i = entry.key;
               final record = entry.value;
               _messageUuidByIndex[i] = record.messageUuid;
-              final createdAtRaw = record.createdAt ??
-                  record.sentAt ??
-                  record.receivedAt;
-              final createdAt = DateTime.tryParse(createdAtRaw ?? '')?.toLocal();
+              final createdAtRaw =
+                  record.createdAt ?? record.sentAt ?? record.receivedAt;
+              final createdAt = DateTime.tryParse(
+                createdAtRaw ?? '',
+              )?.toLocal();
               if (createdAt != null) {
                 _outgoingCreatedAtByIndex[i] = createdAt;
               }
+              final isOutgoing =
+                  _selfContactId != null &&
+                  record.fromContactId == _selfContactId.toString();
               return ChatMessage(
                 text: record.payload,
-                sender: _senderLabelForContactId(record.fromContactId.toString()),
+                sender: _senderLabelForContactId(
+                  record.fromContactId.toString(),
+                ),
                 timestamp: _parseMessageTime(record),
                 isSystem: false,
-                deliveryStatus: _toUiDeliveryStatus(record.deliveryStatus),
+                deliveryStatus: _toLoadedUiDeliveryStatus(
+                  record,
+                  isOutgoing: isOutgoing,
+                ),
               );
             }),
           );
@@ -389,19 +449,21 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (normalized.isEmpty) return null;
     for (final member in _groupMembers) {
       final memberAddr = _hexTargetFromMember(member);
-      if (memberAddr != null && memberAddr == normalized) return member.contactId;
+      if (memberAddr != null && memberAddr == normalized)
+        return member.contactId;
     }
     final id = await LocalDatabaseService.instance.upsertContact(
-      ContactRecord(
-        loraAddress: normalized,
-        displayName: '0x$normalized',
-      ),
+      ContactRecord(loraAddress: normalized, displayName: '0x$normalized'),
     );
     return id;
   }
 
-  List<String> _resolveTargetsFromMembers(List<GroupMemberContactRecord> members) {
-    debugPrint('----------------- _resolveTargetsFromMembers members ----------------------');
+  List<String> _resolveTargetsFromMembers(
+    List<GroupMemberContactRecord> members,
+  ) {
+    debugPrint(
+      '----------------- _resolveTargetsFromMembers members ----------------------',
+    );
     debugPrint('Members: ${members.map((e) => e.displayName).join(', ')}');
     debugPrint('selfAddr: ${_selfAddr}');
     debugPrint('targetHexes: ${_targetHexes}');
@@ -413,14 +475,18 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (_selfAddr.isNotEmpty && normalizedAddress == _selfAddr) continue;
       uniqueTargets.add(normalizedAddress);
     }
-    debugPrint('----------------- _resolveTargetsFromMembers uniqueTargets ----------------------');
+    debugPrint(
+      '----------------- _resolveTargetsFromMembers uniqueTargets ----------------------',
+    );
     debugPrint('UniqueTargets: ${uniqueTargets.toList()}');
     return uniqueTargets.toList()..sort();
   }
 
   String _targetLabel() {
-    if (_targetHexes.isEmpty) return AppLocalizations.of(context).tr('noMembers');
-    if (_targetHexes.length == 1) return '2 ${AppLocalizations.of(context).tr('members')}';
+    if (_targetHexes.isEmpty)
+      return AppLocalizations.of(context).tr('noMembers');
+    if (_targetHexes.length == 1)
+      return '2 ${AppLocalizations.of(context).tr('members')}';
     return '${_targetHexes.length + 1} ${AppLocalizations.of(context).tr('members')}';
   }
 
@@ -464,7 +530,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     // Avoid flapping if firmware repeats lastReceived quickly.
     final now = DateTime.now();
     final last = _lastSoftAckAt;
-    if (last != null && now.difference(last) < const Duration(milliseconds: 600)) {
+    if (last != null &&
+        now.difference(last) < const Duration(milliseconds: 600)) {
       return;
     }
 
@@ -494,11 +561,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
-  ({String senderAddr, String text})? _tryExtractSenderAddrPayload(String payload) {
-    final match =
-        RegExp(r'^([^&:|]+)&([0-9A-Fa-f]{2,8})\s*:\s*(.+)$').firstMatch(
-      payload.trim(),
-    );
+  ({String senderAddr, String text})? _tryExtractSenderAddrPayload(
+    String payload,
+  ) {
+    final match = RegExp(
+      r'^([^&:|]+)&([0-9A-Fa-f]{2,8})\s*:\s*(.+)$',
+    ).firstMatch(payload.trim());
     if (match == null) return null;
     final senderAddr = _normalizeAddress(match.group(2) ?? '');
     final text = _sanitizeIncomingText(match.group(3) ?? '');
@@ -531,7 +599,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return (senderName: null, text: _sanitizeIncomingText(trimmed));
   }
 
-  ({String? groupToken, String payload}) _extractGroupWirePayload(String payload) {
+  ({String? groupToken, String payload}) _extractGroupWirePayload(
+    String payload,
+  ) {
     final trimmed = payload.trim();
     final match = RegExp(r'^GROUP_MSG\|([^|]+)\|(.+)$').firstMatch(trimmed);
     if (match == null) return (groupToken: null, payload: payload);
@@ -551,6 +621,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return lastRx.toUpperCase().contains(needle);
   }
 
+  void _schedulePostSendPolls() {
+    const delays = <Duration>[
+      Duration(milliseconds: 250),
+      Duration(milliseconds: 1200),
+      Duration(milliseconds: 2500),
+    ];
+    for (final delay in delays) {
+      Future<void>.delayed(delay, () {
+        if (!mounted) return;
+        unawaited(_fetchMessages());
+      });
+    }
+  }
+
   Future<void> _fetchMessages() async {
     if (!_isConnected || deviceIp.trim().isEmpty) return;
     if (_suspendGroupStatusPoll) return;
@@ -558,10 +642,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _fetchMessagesInFlight = true;
     try {
       final uri = _buildUri('/api/status');
-      final response = await http.get(uri).timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => throw TimeoutException('/api/status'),
-      );
+      final response = await http
+          .get(uri)
+          .timeout(
+            _statusPollTimeout,
+            onTimeout: () => throw TimeoutException('/api/status'),
+          );
       if (response.statusCode != 200) return;
 
       final rawBody = _decodeResponseBody(response);
@@ -592,7 +678,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         // Keep current chat in sync even if live parser misses a wire variant.
         await _loadGroupMessagesFromDb();
       }
-      final isDuplicate = lastRx == _lastRxText &&
+      final isDuplicate =
+          lastRx == _lastRxText &&
           currentReceivedCount != null &&
           _lastRxReceivedCount != null &&
           currentReceivedCount == _lastRxReceivedCount;
@@ -640,7 +727,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             extracted.groupToken!.trim() != widget.groupUuid.trim()) {
           return;
         }
-        final senderAddrPayload = _tryExtractSenderAddrPayload(extracted.payload);
+        final senderAddrPayload = _tryExtractSenderAddrPayload(
+          extracted.payload,
+        );
         if (_selfAddr.isNotEmpty &&
             senderAddrPayload != null &&
             senderAddrPayload.senderAddr == _selfAddr) {
@@ -696,7 +785,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             extracted.groupToken!.trim() != widget.groupUuid.trim()) {
           return;
         }
-        final senderAddrPayload = _tryExtractSenderAddrPayload(extracted.payload);
+        final senderAddrPayload = _tryExtractSenderAddrPayload(
+          extracted.payload,
+        );
         if (_selfAddr.isNotEmpty &&
             senderAddrPayload != null &&
             senderAddrPayload.senderAddr == _selfAddr) {
@@ -833,6 +924,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     required String plainText,
     required int outgoingIndex,
     required List<String> sendTargets,
+
     /// Numeric DB group id — must match firmware / local parser (`GROUP_MSG|<id>|...`).
     required String groupWireId,
   }) async {
@@ -848,15 +940,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       for (final target in sendTargets) {
         try {
           // Firmware handleSend: /send?msg=...&to=HEX (same as direct chat).
-          final query = <String, String>{
-            'msg': payloadWithName,
-            'to': target,
-          };
+          final query = <String, String>{'msg': payloadWithName, 'to': target};
           final uri = _buildUri('/send', query);
-          final response = await http.get(uri).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () => throw TimeoutException('/send'),
-          );
+          final response = await http
+              .get(uri)
+              .timeout(
+                _sendTimeout,
+                onTimeout: () => throw TimeoutException('/send'),
+              );
           final body = _decodeResponseBody(response).trim();
 
           if (response.statusCode == 200) {
@@ -894,28 +985,44 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
       final total = sendTargets.length;
       if (ackedCount == total) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.acked);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.acked,
+        );
       } else if (ackedCount > 0) {
         // At least one hop confirmed — do not mark whole group send as failed.
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.noAck,
+        );
       } else if (definitiveFailCount == 0) {
         // All paths are no-ack / timeout style (mesh did not confirm HTTP 200).
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.noAck,
+        );
       } else if (definitiveFailCount == total) {
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.failed);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.failed,
+        );
       } else {
         // Mix of definitive failures and no-ack — prefer noAck so user can resend.
-        _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+        _updateOutgoingDeliveryStatus(
+          outgoingIndex,
+          MessageDeliveryStatus.noAck,
+        );
       }
     } catch (_) {
       // Unexpected wrapper-level failure: keep retry-friendly no-ack state.
       _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
+      if (!mounted) return;
       setState(() {
         _currentMessageLength = 0;
       });
-      if (!mounted) return;
     } finally {
       _suspendGroupStatusPoll = false;
+      _schedulePostSendPolls();
       if (_saveDatabaseLocallyEnabled && mounted) {
         // Merge any row persisted by background service (same frame as notification).
         await _loadGroupMessagesFromDb();
@@ -938,11 +1045,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return;
     }
 
-    final details = await LocalDatabaseService.instance.getGroupDetails(widget.groupId);
+    final details = await LocalDatabaseService.instance.getGroupDetails(
+      widget.groupId,
+    );
 
     if (!mounted) return;
-    if (details == null ||
-        details.groupUuid.trim() != sendGroupUuid.trim()) {
+    if (details == null || details.groupUuid.trim() != sendGroupUuid.trim()) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Could not load this group. Try opening it again.'),
@@ -952,9 +1060,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return;
     }
     debugPrint('----------------- _sendMessage details ----------------------');
-    debugPrint('Details: ${details.members.map((e) => e.displayName).join(', ')}');
+    debugPrint(
+      'Details: ${details.members.map((e) => e.displayName).join(', ')}',
+    );
     debugPrint('sendGroupUuid: ${sendGroupUuid}');
-    
+
     final sendTargets = _resolveTargetsFromMembers(details.members);
     if (sendTargets.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1013,18 +1123,23 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   void _updateOutgoingDeliveryStatus(int index, MessageDeliveryStatus status) {
-    if (!mounted || index < 0 || index >= _messages.length) return;
-    final current = _messages[index].deliveryStatus;
-    // Prevent late async callbacks from downgrading a confirmed ACK.
-    if (current == MessageDeliveryStatus.acked &&
-        status != MessageDeliveryStatus.acked) {
-      return;
-    }
-    setState(() {
-      _messages[index] = _messages[index].copyWith(deliveryStatus: status);
-    });
     final uuid = _messageUuidByIndex[index];
-    if (uuid == null) return;
+    var shouldPersist = uuid != null;
+
+    if (mounted && index >= 0 && index < _messages.length) {
+      final current = _messages[index].deliveryStatus;
+      // Prevent late async callbacks from downgrading a confirmed ACK.
+      if (current == MessageDeliveryStatus.acked &&
+          status != MessageDeliveryStatus.acked) {
+        shouldPersist = false;
+      } else {
+        setState(() {
+          _messages[index] = _messages[index].copyWith(deliveryStatus: status);
+        });
+      }
+    }
+
+    if (!shouldPersist || uuid == null) return;
     unawaited(
       LocalDatabaseService.instance.updateMessageDeliveryStatus(
         messageUuid: uuid,
@@ -1070,10 +1185,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
 
     final String sendGroupUuid = widget.groupUuid;
-    final details = await LocalDatabaseService.instance.getGroupDetails(widget.groupId);
+    final details = await LocalDatabaseService.instance.getGroupDetails(
+      widget.groupId,
+    );
     if (!mounted) return;
-    if (details == null ||
-        details.groupUuid.trim() != sendGroupUuid.trim()) {
+    if (details == null || details.groupUuid.trim() != sendGroupUuid.trim()) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -1158,9 +1274,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     } catch (e) {
       debugPrint('Failed to delete group chat history: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to delete history: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to delete history: $e')));
     }
   }
 
@@ -1284,7 +1400,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               child: SafeArea(
                 top: false,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 8,
+                  ),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1294,13 +1413,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           Expanded(
                             child: Container(
                               decoration: BoxDecoration(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .surfaceVariant
-                                    .withOpacity(0.9),
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.surfaceVariant.withOpacity(0.9),
                                 borderRadius: BorderRadius.circular(10),
                               ),
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                              ),
                               child: TextField(
                                 controller: _messageController,
                                 decoration: const InputDecoration(
@@ -1311,11 +1431,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                                 maxLines: 4,
                                 minLines: 1,
                                 maxLength: _maxMessageLength,
-                                textCapitalization: TextCapitalization.sentences,
+                                textCapitalization:
+                                    TextCapitalization.sentences,
                                 onChanged: (value) {
                                   setState(() {
-                                    _currentMessageLength =
-                                        value.length.clamp(0, _maxMessageLength);
+                                    _currentMessageLength = value.length.clamp(
+                                      0,
+                                      _maxMessageLength,
+                                    );
                                   });
                                 },
                                 onSubmitted: (_) => _sendMessage(),
@@ -1347,9 +1470,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         padding: const EdgeInsets.only(left: 4),
                         child: Text(
                           '$_currentMessageLength / $_maxMessageLength',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
                                 fontSize: 11,
-                                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
                               ),
                         ),
                       ),

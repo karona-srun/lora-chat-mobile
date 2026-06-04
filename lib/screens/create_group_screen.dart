@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 
 import '../services/local_database_service.dart';
+import '../utils/group_wire_utils.dart';
 import '../l10n/app_localizations.dart';
 
 class CreatedGroupPayload {
@@ -85,11 +86,11 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
   bool _isHiddenMember(ContactRecord contact) {
     final normalizedAddress = _normalizeAddress(contact.loraAddress);
     final normalizedName = _normalizeAddress(contact.displayName);
-    
+
     final isSystemSender =
         normalizedAddress.startsWith('__GROUP_SENDER') ||
         normalizedName.startsWith('__GROUP_SENDER');
-    
+
     final isIncomingUnknown =
         normalizedAddress.startsWith('__INCOMING__UNKNOWN__') ||
         normalizedName.startsWith('__INCOMING__UNKNOWN__');
@@ -111,14 +112,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
     if (myAddr.isEmpty) return null;
 
     // Ensure self contact exists in local DB so owner is always current user.
-    final fallbackName = myCallSign.isNotEmpty
-        ? myCallSign
-        : '0x$myAddr';
+    final fallbackName = myCallSign.isNotEmpty ? myCallSign : '0x$myAddr';
     final resolvedId = await LocalDatabaseService.instance.upsertContact(
-      ContactRecord(
-        loraAddress: myAddr,
-        displayName: fallbackName,
-      ),
+      ContactRecord(loraAddress: myAddr, displayName: fallbackName),
     );
     _selfContactId = resolvedId;
     return resolvedId;
@@ -150,7 +146,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
           }
         }
       }
-      
+
       if (selfRecord == null && _selfCallSign.isNotEmpty) {
         for (final contact in uniqueContacts) {
           if (contact.displayName.trim().toUpperCase() == _selfCallSign) {
@@ -163,17 +159,18 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
       if (!mounted) return;
       setState(() {
         _selfContactId = selfRecord?.id;
-        _contacts = uniqueContacts
-            .where(
-              (contact) =>
-                  contact.id != _selfContactId && !_isHiddenMember(contact),
-            )
-            .toList()
-          ..sort(
-            (a, b) => a.displayName.toLowerCase().compareTo(
+        _contacts =
+            uniqueContacts
+                .where(
+                  (contact) =>
+                      contact.id != _selfContactId && !_isHiddenMember(contact),
+                )
+                .toList()
+              ..sort(
+                (a, b) => a.displayName.toLowerCase().compareTo(
                   b.displayName.toLowerCase(),
                 ),
-          );
+              );
       });
     } catch (_) {
       if (!mounted) return;
@@ -187,7 +184,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
       if (mounted) {
         setState(() => _isLoading = false);
       }
-    } 
+    }
   }
 
   Future<void> _createGroup() async {
@@ -228,9 +225,11 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
         return;
       }
 
-      final groupUuid =
-          'grp${ownerContactId.toString()}_${DateTime.now().toUtc().microsecondsSinceEpoch}';
-      
+      final groupUuid = GroupWireUtils.createGroupUuid(
+        ownerContactId: ownerContactId,
+        now: DateTime.now(),
+      );
+
       debugPrint('Group UUID: $groupUuid');
 
       // Convert selected addresses into DB contact ids before creating members.
@@ -248,19 +247,21 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
         final resolvedId = await LocalDatabaseService.instance.upsertContact(
           ContactRecord(
             loraAddress: addr,
-            displayName:
-                contact.displayName.trim().isNotEmpty ? contact.displayName.trim() : '0x$addr',
+            displayName: contact.displayName.trim().isNotEmpty
+                ? contact.displayName.trim()
+                : '0x$addr',
           ),
         );
         resolvedMemberIds.add(resolvedId.toString());
       }
 
-      final groupId = await LocalDatabaseService.instance.createGroupWithMembers(
-        groupName: groupName,
-        groupUuid: groupUuid,
-        ownerContactId: ownerContactId,
-        memberContactIds: resolvedMemberIds,
-      );
+      final groupId = await LocalDatabaseService.instance
+          .createGroupWithMembers(
+            groupName: groupName,
+            groupUuid: groupUuid,
+            ownerContactId: ownerContactId,
+            memberContactIds: resolvedMemberIds,
+          );
 
       try {
         final prefs = await SharedPreferences.getInstance();
@@ -274,7 +275,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
               );
 
         final ip = (savedIp != null && savedIp.isNotEmpty) ? savedIp : '';
-        final port = (savedPort != null && savedPort.isNotEmpty) ? savedPort : '';
+        final port = (savedPort != null && savedPort.isNotEmpty)
+            ? savedPort
+            : '';
 
         if (ip.isNotEmpty) {
           final parsedPort = int.tryParse(port);
@@ -289,15 +292,18 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
               .where(
                 (c) =>
                     _normalizeAddress(c.loraAddress).isNotEmpty &&
-                    _selectedContactIds.contains(_normalizeAddress(c.loraAddress)),
+                    _selectedContactIds.contains(
+                      _normalizeAddress(c.loraAddress),
+                    ),
               )
               .toList();
-          final targetAddresses = selectedById
-              .map((c) => _normalizeAddress(c.loraAddress))
-              .where((addr) => addr.isNotEmpty)
-              .toSet()
-              .toList()
-            ..sort();
+          final targetAddresses =
+              selectedById
+                  .map((c) => _normalizeAddress(c.loraAddress))
+                  .where((addr) => addr.isNotEmpty)
+                  .toSet()
+                  .toList()
+                ..sort();
 
           if (targetAddresses.isNotEmpty && ownerAddr.isNotEmpty) {
             final ownerName = _selfCallSign.trim().isNotEmpty
@@ -330,25 +336,20 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
                   'msg': invitePayload.toString(),
                 },
               );
-              await http.get(broadcastUri).timeout(
-                const Duration(seconds: 5),
-              );
+              await http.get(broadcastUri).timeout(const Duration(seconds: 5));
             } catch (_) {}
 
             for (final target in targetAddresses) {
               try {
                 final uri = uriBase.replace(
-                    queryParameters: <String, String>{
+                  queryParameters: <String, String>{
                     'msg': invitePayload.toString(),
                     'to': target,
                   },
                 );
-                await http.get(uri).timeout(
-                  const Duration(seconds: 5),
-                );
+                await http.get(uri).timeout(const Duration(seconds: 5));
               } catch (_) {}
             }
-            
           } else if (ownerAddr.isEmpty) {
             if (!mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
@@ -397,7 +398,10 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(AppLocalizations.of(context).tr('createGroup'), style: Theme.of(context).textTheme.titleLarge,),
+        title: Text(
+          AppLocalizations.of(context).tr('createGroup'),
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
         actions: [
           TextButton(
             onPressed: (_isSubmitting || _isLoading) ? null : _createGroup,
@@ -407,7 +411,10 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : Text(AppLocalizations.of(context).tr('create'), style: Theme.of(context).textTheme.bodySmall,),
+                : Text(
+                    AppLocalizations.of(context).tr('create'),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
           ),
         ],
       ),
@@ -422,7 +429,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
                 textInputAction: TextInputAction.next,
                 decoration: InputDecoration(
                   labelText: AppLocalizations.of(context).tr('groupName'),
-                  hintText: AppLocalizations.of(context).tr('groupNamePlaceholder'),
+                  hintText: AppLocalizations.of(
+                    context,
+                  ).tr('groupNamePlaceholder'),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -445,7 +454,10 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(width: 8),
-                Text('(${_selectedContactIds.length} ${AppLocalizations.of(context).tr('selected')})', style: Theme.of(context).textTheme.bodySmall,),
+                Text(
+                  '(${_selectedContactIds.length} ${AppLocalizations.of(context).tr('selected')})',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ],
             ),
           ),
@@ -453,63 +465,68 @@ class _CreateGroupScreenState extends State<CreateGroupScreen>
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _contacts.isEmpty
-                    ? const Center(
-                        child: Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 20),
-                          child: Text(
-                            'No contacts found. Add contacts first from Direct Messages.',
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                      )
-                    : ListView.separated(
-                        itemCount: _contacts.length,
-                        separatorBuilder: (_, __) => const Divider(
-                          height: 0,
-                          thickness: 0,
-                          color: Colors.transparent,
-                        ),
-                        itemBuilder: (context, index) {
-                          final contact = _contacts[index];
-                          final isSelected =
-                              _selectedContactIds.contains(_normalizeAddress(contact.loraAddress));
-                          return SizedBox(
-                            height: 52,
-                            child: CheckboxListTile(
-                              dense: true,
-                              visualDensity: const VisualDensity(
-                                vertical: -2,
-                                horizontal: -1,
-                              ),
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                              ),
-                              value: isSelected,
-                              onChanged: _isSubmitting
-                                  ? null
-                                  : (value) {
-                                      if (contact.id == null) return;
-                                      setState(() {
-                                        if (value == true) {
-                                          _selectedContactIds.add(_normalizeAddress(contact.loraAddress));
-                                        } else {
-                                          _selectedContactIds.remove(_normalizeAddress(contact.loraAddress));
-                                        }
-                                      });
-                                    },
-                              title: Text(
-                                contact.displayName,
-                                style: const TextStyle(fontSize: 14),
-                              ),
-                              subtitle: Text(
-                                '0x${_normalizeAddress(contact.loraAddress)}',
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                              controlAffinity: ListTileControlAffinity.leading,
-                            ),
-                          );
-                        },
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 20),
+                      child: Text(
+                        'No contacts found. Add contacts first from Direct Messages.',
+                        textAlign: TextAlign.center,
                       ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: _contacts.length,
+                    separatorBuilder: (_, __) => const Divider(
+                      height: 0,
+                      thickness: 0,
+                      color: Colors.transparent,
+                    ),
+                    itemBuilder: (context, index) {
+                      final contact = _contacts[index];
+                      final isSelected = _selectedContactIds.contains(
+                        _normalizeAddress(contact.loraAddress),
+                      );
+                      return SizedBox(
+                        height: 52,
+                        child: CheckboxListTile(
+                          dense: true,
+                          visualDensity: const VisualDensity(
+                            vertical: -2,
+                            horizontal: -1,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                          ),
+                          value: isSelected,
+                          onChanged: _isSubmitting
+                              ? null
+                              : (value) {
+                                  if (contact.id == null) return;
+                                  setState(() {
+                                    if (value == true) {
+                                      _selectedContactIds.add(
+                                        _normalizeAddress(contact.loraAddress),
+                                      );
+                                    } else {
+                                      _selectedContactIds.remove(
+                                        _normalizeAddress(contact.loraAddress),
+                                      );
+                                    }
+                                  });
+                                },
+                          title: Text(
+                            contact.displayName,
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                          subtitle: Text(
+                            '0x${_normalizeAddress(contact.loraAddress)}',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          controlAffinity: ListTileControlAffinity.leading,
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),

@@ -11,6 +11,7 @@ import '../models/chat_message.dart';
 import '../services/local_database_service.dart';
 import '../services/chat_unread_dot_service.dart';
 import '../services/message_background_service.dart';
+import '../utils/gps_message_utils.dart';
 import '../utils/json_string_sanitize.dart';
 import '../widgets/chat_bubble.dart';
 
@@ -746,6 +747,141 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
 
   Future<void> _sendMessage() async {
     final messageText = _messageController.text.trim();
+    await _sendOutgoingText(messageText);
+  }
+
+  Future<int> _appendOutgoingDirectMessage(
+    String messageText, {
+    MessageDeliveryStatus status = MessageDeliveryStatus.sending,
+    String persistErrorLabel = 'outgoing direct message',
+  }) async {
+    var outgoingIndex = -1;
+    setState(() {
+      outgoingIndex = _messages.length;
+      _messages.add(
+        ChatMessage(
+          text: messageText,
+          sender: 'You',
+          timestamp: DateTime.now(),
+          isSystem: false,
+          deliveryStatus: status,
+        ),
+      );
+    });
+
+    final selfId = _selfContactId;
+    final targetId = _targetContactId;
+    if (selfId != null && targetId != null) {
+      final uuid = _newMessageUuid();
+      _messageUuidByIndex[outgoingIndex] = uuid;
+      try {
+        await _persistDirectMessage(
+          messageUuid: uuid,
+          fromContactId: selfId.toString(),
+          toContactId: targetId.toString(),
+          payload: messageText,
+          status: status,
+        );
+      } catch (e) {
+        debugPrint('Failed to persist $persistErrorLabel: $e');
+      }
+    }
+
+    _scrollToBottom();
+    return outgoingIndex;
+  }
+
+  Map<String, String> _buildGpsQuery({bool useRelay = false}) {
+    final query = <String, String>{};
+    if (useRelay) {
+      query['relay'] = '1';
+    }
+    final target = _targetHex;
+    if (target != null && target.isNotEmpty) {
+      query['to'] = target;
+    }
+    return query;
+  }
+
+  Future<void> _sendGPS({bool useRelay = false}) async {
+    if (!_isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please connect to a mesh network first'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    _suspendStatusPoll = true;
+    try {
+      final uri = _buildUri('/gps', _buildGpsQuery(useRelay: useRelay));
+      final response = await http
+          .get(uri)
+          .timeout(
+            _sendTimeout,
+            onTimeout: () => throw TimeoutException('/gps'),
+          );
+      final body = _decodeResponseBody(response).trim();
+      final preview = GpsMessageUtils.previewBody(body);
+      final gpsMessage = GpsMessageUtils.formatResponseMessage(preview);
+      final deliveryStatus = GpsMessageUtils.deliveryStatusFromResponse(
+        response,
+        body,
+      );
+
+      await _appendOutgoingDirectMessage(
+        gpsMessage.isEmpty ? GpsMessageUtils.fallbackMessage : gpsMessage,
+        status: deliveryStatus,
+        persistErrorLabel: 'outgoing GPS message',
+      );
+
+      if (!mounted) return;
+      if (deliveryStatus == MessageDeliveryStatus.failed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(preview.isEmpty ? 'GPS request failed' : preview),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } on TimeoutException catch (_) {
+      await _appendOutgoingDirectMessage(
+        GpsMessageUtils.fallbackMessage,
+        status: MessageDeliveryStatus.noAck,
+        persistErrorLabel: 'timed out GPS message',
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('GPS request timed out'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    } catch (e) {
+      await _appendOutgoingDirectMessage(
+        GpsMessageUtils.fallbackMessage,
+        status: MessageDeliveryStatus.failed,
+        persistErrorLabel: 'failed GPS message',
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to send GPS: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      _suspendStatusPoll = false;
+      _schedulePostSendPolls();
+    }
+  }
+
+  Future<void> _sendOutgoingText(
+    String messageText, {
+    bool clearComposer = true,
+  }) async {
     if (messageText.isEmpty) return;
 
     if (!_isConnected) {
@@ -770,7 +906,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
           deliveryStatus: MessageDeliveryStatus.sending,
         ),
       );
-      _currentMessageLength = 0;
+      if (clearComposer) {
+        _currentMessageLength = 0;
+      }
     });
     final selfId = _selfContactId;
     final targetId = _targetContactId;
@@ -791,7 +929,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
         debugPrint('Failed to persist outgoing direct message: $e');
       }
     }
-    _messageController.clear();
+    if (clearComposer) {
+      _messageController.clear();
+    }
     _scrollToBottom();
 
     _suspendStatusPoll = true;
@@ -1153,6 +1293,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                   children: [
                     Row(
                       children: [
+                        IconButton(
+                          onPressed: _sendGPS,
+                          icon: const Icon(Icons.online_prediction_outlined),
+                        ),
                         // Message input
                         Expanded(
                           child: Container(
@@ -1194,9 +1338,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                           child: ElevatedButton(
                             onPressed: _sendMessage,
                             style: ElevatedButton.styleFrom(
-                              padding: EdgeInsets.zero,
+                              padding: EdgeInsets.all(0),
                               shape: const CircleBorder(),
-                              elevation: 1,
+                              elevation: 0,
                             ),
                             child: Image.asset(
                               'assets/icons/send.png',

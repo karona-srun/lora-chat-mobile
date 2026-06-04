@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
+import '../utils/group_wire_utils.dart';
 import '../utils/json_string_sanitize.dart';
 import '../services/local_database_service.dart';
 import 'chat_unread_dot_service.dart';
@@ -572,6 +573,20 @@ class MessageBackgroundService {
     return null;
   }
 
+  static Future<GroupSummaryRecord?> _resolveGroupSummaryFromWireToken(
+    String token,
+  ) async {
+    final trimmed = token.trim();
+    if (trimmed.isEmpty) return null;
+    final groups = await LocalDatabaseService.instance.listGroups();
+    for (final group in groups) {
+      if (GroupWireUtils.tokenMatchesGroup(trimmed, group.groupUuid)) {
+        return group;
+      }
+    }
+    return null;
+  }
+
   static Future<void> _markUnreadDotsFromFrame(String lastRx) async {
     if (_isIgnoredStatusNoise(lastRx)) return;
     if (_containsControlFrame(lastRx, 'GROUP_INVITE')) return;
@@ -624,11 +639,12 @@ class MessageBackgroundService {
     for (final blob in blobs) {
       final g = _parsePipeGroupMessage(blob);
       if (g != null) {
-        final uuid = _groupTokenFromWire(blob);
-        if (uuid != null &&
-            uuid.isNotEmpty &&
-            (myAddr.isEmpty || g.senderAddr != myAddr)) {
-          await ChatUnreadDotService.markGroupUnread(uuid);
+        final token = _groupTokenFromWire(blob);
+        final group = token == null
+            ? null
+            : await _resolveGroupSummaryFromWireToken(token);
+        if (group != null && (myAddr.isEmpty || g.senderAddr != myAddr)) {
+          await ChatUnreadDotService.markGroupUnread(group.groupUuid);
         }
         return;
       }
@@ -752,10 +768,10 @@ class MessageBackgroundService {
       } else if (parts.length >= 3 && parts[0].toUpperCase() == 'GROUP_MSG') {
         groupToken = parts[1];
       }
-      final groupUuid = (groupToken ?? '').trim();
-      final groupDbId = groupUuid.isEmpty
+      final group = groupToken == null
           ? null
-          : await LocalDatabaseService.instance.getGroupIdByUuid(groupUuid);
+          : await _resolveGroupSummaryFromWireToken(groupToken);
+      final groupDbId = group?.groupId;
       if (groupDbId == null) return;
 
       final fromContactId = await LocalDatabaseService.instance.upsertContact(

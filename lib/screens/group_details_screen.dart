@@ -965,15 +965,15 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
           onPressed: () => Navigator.of(context).pop(),
           icon: const Icon(Icons.arrow_back_ios_new),
         ),
-        actions: [
-          IconButton(
-            onPressed: _updatingMembers || _loading || _details == null
-                ? null
-                : _showAddMembersSheet,
-            icon: const Icon(Icons.person_add_alt_1),
-            tooltip: AppLocalizations.of(context).tr('addMembers'),
-          ),
-        ],
+        // actions: [
+        //   IconButton(
+        //     onPressed: _updatingMembers || _loading || _details == null
+        //         ? null
+        //         : _showAddMembersSheet,
+        //     icon: const Icon(Icons.person_add_alt_1),
+        //     tooltip: AppLocalizations.of(context).tr('addMembers'),
+        //   ),
+        // ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -1040,24 +1040,24 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
                                     ).textTheme.labelLarge,
                                   ),
                                 ),
-                                TextButton.icon(
-                                  onPressed: _savingGroupName
-                                      ? null
-                                      : _toggleGroupNameEditor,
-                                  icon: Icon(
-                                    _editingGroupName
-                                        ? Icons.close
-                                        : Icons.edit_outlined,
-                                    size: 18,
-                                  ),
-                                  label: Text(
-                                    _editingGroupName
-                                        ? AppLocalizations.of(
-                                            context,
-                                          ).tr('cancalButton')
-                                        : '',
-                                  ),
-                                ),
+                                // TextButton.icon(
+                                //   onPressed: _savingGroupName
+                                //       ? null
+                                //       : _toggleGroupNameEditor,
+                                //   icon: Icon(
+                                //     _editingGroupName
+                                //         ? Icons.close
+                                //         : Icons.edit_outlined,
+                                //     size: 18,
+                                //   ),
+                                //   label: Text(
+                                //     _editingGroupName
+                                //         ? AppLocalizations.of(
+                                //             context,
+                                //           ).tr('cancalButton')
+                                //         : '',
+                                //   ),
+                                // ),
                               ],
                             ),
                             if (_editingGroupName) ...[
@@ -1156,24 +1156,24 @@ class _GroupDetailsScreenState extends State<GroupDetailsScreen>
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Text(_roleLabel(member.role)),
-                                IconButton(
-                                  icon: Icon(
-                                    _roleLabel(member.role).toString() ==
-                                            "Owner"
-                                        ? Icons.person
-                                        : Icons.person_remove_alt_1,
-                                    size: 20,
-                                    color:
-                                        _roleLabel(member.role).toString() ==
-                                            "Owner"
-                                        ? Colors.grey
-                                        : Colors.redAccent,
-                                  ),
-                                  tooltip: 'Remove member',
-                                  onPressed: _updatingMembers
-                                      ? null
-                                      : () => _removeMember(member),
-                                ),
+                                // IconButton(
+                                //   icon: Icon(
+                                //     _roleLabel(member.role).toString() ==
+                                //             "Owner"
+                                //         ? Icons.person
+                                //         : Icons.person_remove_alt_1,
+                                //     size: 20,
+                                //     color:
+                                //         _roleLabel(member.role).toString() ==
+                                //             "Owner"
+                                //         ? Colors.grey
+                                //         : Colors.redAccent,
+                                //   ),
+                                //   tooltip: 'Remove member',
+                                //   onPressed: _updatingMembers
+                                //       ? null
+                                //       : () => _removeMember(member),
+                                // ),
                               ],
                             ),
                           ),

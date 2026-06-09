@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../utils/group_wire_utils.dart';
+import '../utils/gps_message_utils.dart';
 import '../utils/json_string_sanitize.dart';
 import '../services/local_database_service.dart';
 import 'chat_unread_dot_service.dart';
@@ -427,7 +428,7 @@ class MessageBackgroundService {
     text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
     // Preserve UTF-8 message content (Khmer, emoji, etc.); remove only wire noise.
     text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
-    return text;
+    return GpsMessageUtils.formatResponseMessage(text);
   }
 
   static ({String? senderName, String text}) _splitSenderFromPayload(

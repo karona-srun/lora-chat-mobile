@@ -450,7 +450,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
     // Preserve UTF-8 message content (Khmer, emoji, etc.); remove only wire noise.
     text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
-    return text;
+    return GpsMessageUtils.formatResponseMessage(text);
   }
 
   String _sanitizeIncomingTextRelay(String raw) {
@@ -466,7 +466,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
     if (nestedMsg != null) {
       text = (nestedMsg.group(1) ?? '').trim();
     }
-    return text;
+    return _sanitizeIncomingText(text);
   }
 
   /// Pads node ids to 4 hex digits for comparison with [_targetHex].
@@ -825,11 +825,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
           );
       final body = _decodeResponseBody(response).trim();
       final preview = GpsMessageUtils.previewBody(body);
-      final gpsMessage = GpsMessageUtils.formatResponseMessage(preview);
+      final gpsMessage = GpsMessageUtils.formatResponseMessage(body);
       final deliveryStatus = GpsMessageUtils.deliveryStatusFromResponse(
         response,
         body,
       );
+
+      debugPrint(preview);
+      debugPrint(gpsMessage);
 
       await _appendOutgoingDirectMessage(
         gpsMessage.isEmpty ? GpsMessageUtils.fallbackMessage : gpsMessage,
@@ -1274,7 +1277,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
               color: Theme.of(context).scaffoldBackgroundColor,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.05),
+                  color: Colors.black.withValues(alpha: 0.05),
                   blurRadius: 6,
                   offset: const Offset(0, -2),
                 ),
@@ -1301,9 +1304,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                         Expanded(
                           child: Container(
                             decoration: BoxDecoration(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.surfaceVariant.withOpacity(0.9),
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHighest
+                                  .withValues(alpha: 0.9),
                               borderRadius: BorderRadius.circular(10),
                             ),
                             padding: const EdgeInsets.symmetric(horizontal: 12),

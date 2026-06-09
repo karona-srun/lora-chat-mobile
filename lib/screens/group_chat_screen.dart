@@ -71,6 +71,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   int? _lastDbSyncedReceivedCount;
   int _currentMessageLength = 0;
   final Map<int, String> _messageUuidByIndex = <int, String>{};
+  final Map<int, Map<String, MessageDeliveryStatus>>
+  _targetDeliveryStatusByIndex = <int, Map<String, MessageDeliveryStatus>>{};
 
   /// Avoid overlapping `/api/status` polls (timer can fire while a request is still in flight).
   bool _fetchMessagesInFlight = false;
@@ -126,6 +128,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _lastRxReceivedCount = null;
       _messageUuidByIndex.clear();
       _outgoingCreatedAtByIndex.clear();
+      _targetDeliveryStatusByIndex.clear();
       _messages
         ..clear()
         ..add(
@@ -357,9 +360,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       }
 
       if (!mounted) return;
+      final targetStatusesByUuid =
+          <String, Map<String, MessageDeliveryStatus>>{};
+      for (final entry in _messageUuidByIndex.entries) {
+        final uuid = entry.value;
+        final statuses = _targetDeliveryStatusByIndex[entry.key];
+        if (statuses == null || statuses.isEmpty) continue;
+        targetStatusesByUuid[uuid] = Map<String, MessageDeliveryStatus>.from(
+          statuses,
+        );
+      }
       setState(() {
         _messageUuidByIndex.clear();
         _outgoingCreatedAtByIndex.clear();
+        _targetDeliveryStatusByIndex.clear();
         _messages
           ..clear()
           ..addAll(
@@ -378,6 +392,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               final isOutgoing =
                   _selfContactId != null &&
                   record.fromContactId == _selfContactId.toString();
+              final restoredTargetStatuses =
+                  targetStatusesByUuid[record.messageUuid];
+              if (restoredTargetStatuses != null &&
+                  restoredTargetStatuses.isNotEmpty) {
+                _targetDeliveryStatusByIndex[i] = restoredTargetStatuses;
+              }
               return ChatMessage(
                 text: record.payload,
                 sender: _senderLabelForContactId(
@@ -389,6 +409,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                   record,
                   isOutgoing: isOutgoing,
                 ),
+                deliveryDetails: _groupTargetDeliveryDetails(i),
               );
             }),
           );
@@ -501,6 +522,210 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return '2 ${AppLocalizations.of(context).tr('members')}';
     }
     return '${_targetHexes.length + 1} ${AppLocalizations.of(context).tr('members')}';
+  }
+
+  String _memberLabelForTarget(String targetHex) {
+    final normalized = _normalizeAddress(targetHex);
+    for (final member in _groupMembers) {
+      final memberAddr = _hexTargetFromMember(member);
+      if (memberAddr != null && memberAddr == normalized) {
+        final name = member.displayName.trim();
+        if (name.isNotEmpty) return name;
+      }
+    }
+    return normalized.isEmpty ? 'Unknown' : '0x$normalized';
+  }
+
+  String _groupTargetDeliveryDetails(int index) {
+    final statuses = _targetDeliveryStatusByIndex[index];
+    if (statuses == null || statuses.isEmpty) return '';
+
+    String namesFor(MessageDeliveryStatus status) {
+      return statuses.entries
+          .where((entry) => entry.value == status)
+          .map((entry) => _memberLabelForTarget(entry.key))
+          .join(', ');
+    }
+
+    final lines = <String>[];
+    final acked = namesFor(MessageDeliveryStatus.acked);
+    final pending = namesFor(MessageDeliveryStatus.sending);
+    final noAck = namesFor(MessageDeliveryStatus.noAck);
+    final failed = namesFor(MessageDeliveryStatus.failed);
+    if (acked.isNotEmpty) lines.add('ACK by: $acked');
+    if (pending.isNotEmpty) lines.add('Sending: $pending');
+    if (noAck.isNotEmpty) lines.add('No ACK: $noAck');
+    if (failed.isNotEmpty) lines.add('Failed: $failed');
+    return lines.join('\n');
+  }
+
+  void _setGroupTargetDeliveryStatuses({
+    required int index,
+    required List<String> targets,
+    required MessageDeliveryStatus status,
+  }) {
+    final normalizedTargets = targets
+        .map(_normalizeAddress)
+        .where((target) => target.isNotEmpty)
+        .toList();
+    if (normalizedTargets.isEmpty) return;
+    if (!mounted) return;
+
+    setState(() {
+      _targetDeliveryStatusByIndex[index] = {
+        for (final target in normalizedTargets) target: status,
+      };
+      if (index >= 0 && index < _messages.length) {
+        _messages[index] = _messages[index].copyWith(
+          deliveryDetails: _groupTargetDeliveryDetails(index),
+        );
+      }
+    });
+  }
+
+  void _markGroupTargetsSending({
+    required int index,
+    required List<String> targets,
+  }) {
+    final normalizedTargets = targets
+        .map(_normalizeAddress)
+        .where((target) => target.isNotEmpty)
+        .toList();
+    if (normalizedTargets.isEmpty) return;
+    if (!mounted) return;
+
+    setState(() {
+      final statuses = _targetDeliveryStatusByIndex.putIfAbsent(
+        index,
+        () => <String, MessageDeliveryStatus>{},
+      );
+      for (final target in normalizedTargets) {
+        statuses[target] = MessageDeliveryStatus.sending;
+      }
+      if (index >= 0 && index < _messages.length) {
+        _messages[index] = _messages[index].copyWith(
+          deliveryDetails: _groupTargetDeliveryDetails(index),
+        );
+      }
+    });
+  }
+
+  void _updateGroupTargetDeliveryStatus({
+    required int index,
+    required String target,
+    required MessageDeliveryStatus status,
+  }) {
+    final normalizedTarget = _normalizeAddress(target);
+    if (normalizedTarget.isEmpty) return;
+    if (!mounted) return;
+
+    setState(() {
+      final statuses = _targetDeliveryStatusByIndex.putIfAbsent(
+        index,
+        () => <String, MessageDeliveryStatus>{},
+      );
+      statuses[normalizedTarget] = status;
+      if (index >= 0 && index < _messages.length) {
+        _messages[index] = _messages[index].copyWith(
+          deliveryDetails: _groupTargetDeliveryDetails(index),
+        );
+      }
+    });
+  }
+
+  void _setGroupTargetDeliveryStatusMap({
+    required int index,
+    required Map<String, MessageDeliveryStatus> statuses,
+  }) {
+    if (statuses.isEmpty) return;
+    if (!mounted) return;
+    setState(() {
+      _targetDeliveryStatusByIndex[index] =
+          Map<String, MessageDeliveryStatus>.from(statuses);
+      if (index >= 0 && index < _messages.length) {
+        _messages[index] = _messages[index].copyWith(
+          deliveryDetails: _groupTargetDeliveryDetails(index),
+        );
+      }
+    });
+  }
+
+  MessageDeliveryStatus _overallGroupDeliveryStatusForTargets({
+    required int index,
+    required List<String> expectedTargets,
+  }) {
+    final normalizedTargets = expectedTargets
+        .map(_normalizeAddress)
+        .where((target) => target.isNotEmpty)
+        .toList();
+    if (normalizedTargets.isEmpty) return MessageDeliveryStatus.failed;
+
+    final statuses = _targetDeliveryStatusByIndex[index] ?? const {};
+    var ackedCount = 0;
+    var failedCount = 0;
+    var sendingCount = 0;
+
+    for (final target in normalizedTargets) {
+      final status = statuses[target] ?? MessageDeliveryStatus.noAck;
+      switch (status) {
+        case MessageDeliveryStatus.acked:
+          ackedCount += 1;
+        case MessageDeliveryStatus.failed:
+          failedCount += 1;
+        case MessageDeliveryStatus.sending:
+          sendingCount += 1;
+        case MessageDeliveryStatus.noAck:
+        case MessageDeliveryStatus.none:
+          break;
+      }
+    }
+
+    if (ackedCount == normalizedTargets.length) {
+      return MessageDeliveryStatus.acked;
+    }
+    if (sendingCount > 0) return MessageDeliveryStatus.sending;
+    if (failedCount == normalizedTargets.length) {
+      return MessageDeliveryStatus.failed;
+    }
+    return MessageDeliveryStatus.noAck;
+  }
+
+  List<String> _failedGroupTargetsForRetry({
+    required int index,
+    required List<String> fallbackTargets,
+  }) {
+    final statuses = _targetDeliveryStatusByIndex[index];
+    if (statuses == null || statuses.isEmpty) return fallbackTargets;
+
+    final retryTargets = <String>[];
+    final fallbackSet = fallbackTargets.map(_normalizeAddress).toSet();
+    for (final entry in statuses.entries) {
+      final target = _normalizeAddress(entry.key);
+      if (target.isEmpty || !fallbackSet.contains(target)) continue;
+      if (entry.value == MessageDeliveryStatus.failed ||
+          entry.value == MessageDeliveryStatus.noAck) {
+        retryTargets.add(target);
+      }
+    }
+    retryTargets.sort();
+    return retryTargets;
+  }
+
+  void _updateOutgoingMessageText(int index, String text) {
+    final nextText = text.trim();
+    if (nextText.isEmpty) return;
+    if (!mounted || index < 0 || index >= _messages.length) return;
+    setState(() {
+      _messages[index] = _messages[index].copyWith(text: nextText);
+    });
+    final uuid = _messageUuidByIndex[index];
+    if (uuid == null) return;
+    unawaited(
+      LocalDatabaseService.instance.updateMessagePayload(
+        messageUuid: uuid,
+        payload: nextText,
+      ),
+    );
   }
 
   Future<({GroupDetailsRecord details, List<String> sendTargets})?>
@@ -624,7 +849,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     text = text.replaceFirst(RegExp(r'^\d+\|'), '').trimLeft();
     // Keep emoji/non-ASCII content, only strip control characters.
     text = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
-    return text;
+    return GpsMessageUtils.formatResponseMessage(text);
   }
 
   void _softAckOutgoingIfMatched(String incomingText) {
@@ -911,18 +1136,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         // Do not hard-drop relayed frames using cached target list. While user is
         // active in chat, members/targets may lag behind and hide valid messages.
         if (!mounted) return;
-        int? fromContactId;
-        if (relayDest.isNotEmpty) {
-          fromContactId = await _findContactIdForAddress(relayDest);
-        }
-        if (fromContactId == null) {
-          fromContactId = await LocalDatabaseService.instance.upsertContact(
-            ContactRecord(
-              loraAddress: '__GROUP_RELAY__$relayDest',
-              displayName: parsed.senderName ?? 'Relay',
-            ),
-          );
-        }
+        int? fromContactId = relayDest.isNotEmpty
+            ? await _findContactIdForAddress(relayDest)
+            : null;
+        fromContactId ??= await LocalDatabaseService.instance.upsertContact(
+          ContactRecord(
+            loraAddress: '__GROUP_RELAY__$relayDest',
+            displayName: parsed.senderName ?? 'Relay',
+          ),
+        );
         await _persistGroupMessage(
           messageUuid: _newMessageUuid(),
           fromContactId: fromContactId,
@@ -1039,6 +1261,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }) {
     if (total <= 0) return MessageDeliveryStatus.failed;
     if (ackedCount == total) return MessageDeliveryStatus.acked;
+    if (ackedCount == 0 && definitiveFailCount == total) {
+      return MessageDeliveryStatus.failed;
+    }
     return MessageDeliveryStatus.noAck;
   }
 
@@ -1094,10 +1319,86 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return query;
   }
 
+  Future<
+    ({
+      int ackedCount,
+      int definitiveFailCount,
+      String? firstResponseBody,
+      Map<String, MessageDeliveryStatus> targetStatuses,
+    })
+  >
+  _sendRequestToGroupTargets({
+    required List<String> sendTargets,
+    required String path,
+    required Map<String, String> Function(String target) queryForTarget,
+    required String timeoutLabel,
+    required MessageDeliveryStatus Function(http.Response response, String body)
+    deliveryStatusForResponse,
+    bool Function(http.Response response)? isDefinitiveFailure,
+    void Function(String target, MessageDeliveryStatus status)?
+    onTargetComplete,
+  }) async {
+    var ackedCount = 0;
+    var definitiveFailCount = 0;
+    String? firstResponseBody;
+    final targetStatuses = <String, MessageDeliveryStatus>{};
+
+    void completeTarget(String target, MessageDeliveryStatus status) {
+      final normalizedTarget = _normalizeAddress(target);
+      if (normalizedTarget.isNotEmpty) {
+        targetStatuses[normalizedTarget] = status;
+      }
+      onTargetComplete?.call(target, status);
+    }
+
+    for (final target in sendTargets) {
+      try {
+        final uri = _buildUri(path, queryForTarget(target));
+        final response = await http
+            .get(uri)
+            .timeout(
+              _sendTimeout,
+              onTimeout: () => throw TimeoutException(timeoutLabel),
+            );
+        final body = _decodeResponseBody(response).trim();
+        if (firstResponseBody == null && body.isNotEmpty) {
+          firstResponseBody = body;
+        }
+
+        final deliveryStatus = deliveryStatusForResponse(response, body);
+        if (deliveryStatus == MessageDeliveryStatus.acked) {
+          ackedCount += 1;
+          completeTarget(target, MessageDeliveryStatus.acked);
+        } else if (deliveryStatus == MessageDeliveryStatus.failed &&
+            (isDefinitiveFailure?.call(response) ?? true)) {
+          definitiveFailCount += 1;
+          completeTarget(target, MessageDeliveryStatus.failed);
+        } else {
+          completeTarget(target, MessageDeliveryStatus.noAck);
+        }
+      } on TimeoutException catch (_) {
+        // Timeouts are no-ack style uncertainty; leave the message retryable.
+        completeTarget(target, MessageDeliveryStatus.noAck);
+      } catch (_) {
+        // Transport failures mean this request definitively did not leave via HTTP.
+        definitiveFailCount += 1;
+        completeTarget(target, MessageDeliveryStatus.failed);
+      }
+    }
+
+    return (
+      ackedCount: ackedCount,
+      definitiveFailCount: definitiveFailCount,
+      firstResponseBody: firstResponseBody,
+      targetStatuses: targetStatuses,
+    );
+  }
+
   Future<void> _deliverGroupMessageToTargets({
     required String plainText,
     required int outgoingIndex,
     required List<String> sendTargets,
+    bool resetTargetStatuses = true,
 
     /// Numeric DB group id — must match firmware / local parser (`GROUP_MSG|<id>|...`).
     required String groupWireId,
@@ -1106,88 +1407,54 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final senderAddr = _selfAddr.isNotEmpty ? _selfAddr : '0000';
     final payloadWithName =
         'GROUP_MSG|$groupWireId|$senderName&$senderAddr: $plainText';
+    if (resetTargetStatuses) {
+      _setGroupTargetDeliveryStatuses(
+        index: outgoingIndex,
+        targets: sendTargets,
+        status: MessageDeliveryStatus.sending,
+      );
+    } else {
+      _markGroupTargetsSending(index: outgoingIndex, targets: sendTargets);
+    }
     _suspendGroupStatusPoll = true;
     try {
-      var ackedCount = 0;
-      var definitiveFailCount = 0;
-
-      for (final target in sendTargets) {
-        try {
-          // Firmware handleSend: /send?msg=...&to=HEX (same as direct chat).
-          final query = <String, String>{'msg': payloadWithName, 'to': target};
-          final uri = _buildUri('/send', query);
-          final response = await http
-              .get(uri)
-              .timeout(
-                _sendTimeout,
-                onTimeout: () => throw TimeoutException('/send'),
-              );
-          final body = _decodeResponseBody(response).trim();
-
+      await _sendRequestToGroupTargets(
+        sendTargets: sendTargets,
+        path: '/send',
+        timeoutLabel: '/send',
+        queryForTarget: (target) => <String, String>{
+          'msg': payloadWithName,
+          'to': target,
+        },
+        deliveryStatusForResponse: (response, body) {
           final normalizedBody = body.toUpperCase();
-          if (response.statusCode == 200) {
-            ackedCount += 1;
-          } else if (response.statusCode == 504 ||
+          if (response.statusCode == 200) return MessageDeliveryStatus.acked;
+          if (response.statusCode == 504 ||
               normalizedBody.contains('NO ACK') ||
               normalizedBody.contains('TIMEOUT')) {
-            // Soft miss — mesh / HTTP did not confirm delivery; not a hard send failure.
-          } else if (response.statusCode >= 400 &&
-              response.statusCode < 500 &&
-              response.statusCode != 408 &&
-              response.statusCode != 429) {
-            // Definite request-side failure (bad payload/params), safe to mark failed.
-            definitiveFailCount += 1;
-          } else {
-            // Server-side or unknown status: treat as no-ack style uncertainty.
+            return MessageDeliveryStatus.noAck;
           }
-        } on TimeoutException catch (_) {
-          // Radio busy / device handling send — same class as mesh "no ack", not hard fail.
-          if (mounted) {
-            setState(() {
-              _currentMessageLength = 0;
-            });
-          }
-        } catch (_) {
-          // Transport exceptions (socket, route, etc.) are usually transient.
-          // Keep resend UX by classifying as no-ack.
-          if (mounted) {
-            setState(() {
-              _currentMessageLength = 0;
-            });
-          }
-        }
-      }
+          return MessageDeliveryStatus.failed;
+        },
+        isDefinitiveFailure: (response) =>
+            response.statusCode >= 400 &&
+            response.statusCode < 500 &&
+            response.statusCode != 408 &&
+            response.statusCode != 429,
+        onTargetComplete: (target, status) => _updateGroupTargetDeliveryStatus(
+          index: outgoingIndex,
+          target: target,
+          status: status,
+        ),
+      );
 
-      final total = sendTargets.length;
-      if (ackedCount == total) {
-        _updateOutgoingDeliveryStatus(
-          outgoingIndex,
-          MessageDeliveryStatus.acked,
-        );
-      } else if (ackedCount > 0) {
-        // At least one hop confirmed — do not mark whole group send as failed.
-        _updateOutgoingDeliveryStatus(
-          outgoingIndex,
-          MessageDeliveryStatus.noAck,
-        );
-      } else if (definitiveFailCount == 0) {
-        // All paths are no-ack / timeout style (mesh did not confirm HTTP 200).
-        _updateOutgoingDeliveryStatus(
-          outgoingIndex,
-          MessageDeliveryStatus.noAck,
-        );
-      } else if (definitiveFailCount == total) {
-        _updateOutgoingDeliveryStatus(
-          outgoingIndex,
-          MessageDeliveryStatus.failed,
-        );
-      } else {
-        // Mix of definitive failures and no-ack — prefer noAck so user can resend.
-        _updateOutgoingDeliveryStatus(
-          outgoingIndex,
-          MessageDeliveryStatus.noAck,
-        );
-      }
+      final status = _overallGroupDeliveryStatusForTargets(
+        index: outgoingIndex,
+        expectedTargets:
+            _targetDeliveryStatusByIndex[outgoingIndex]?.keys.toList() ??
+            sendTargets,
+      );
+      _updateOutgoingDeliveryStatus(outgoingIndex, status);
     } catch (_) {
       // Unexpected wrapper-level failure: keep retry-friendly no-ack state.
       _updateOutgoingDeliveryStatus(outgoingIndex, MessageDeliveryStatus.noAck);
@@ -1209,60 +1476,50 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final sendContext = await _prepareGroupSendContext();
     if (sendContext == null) return;
     final sendTargets = sendContext.sendTargets;
+    final outgoingIndex = await _appendOutgoingGroupMessage(
+      GpsMessageUtils.fallbackMessage,
+      persistErrorLabel: 'outgoing group GPS message',
+    );
+    _setGroupTargetDeliveryStatuses(
+      index: outgoingIndex,
+      targets: sendTargets,
+      status: MessageDeliveryStatus.sending,
+    );
 
     _suspendGroupStatusPoll = true;
     try {
-      var ackedCount = 0;
-      var definitiveFailCount = 0;
-      String? firstResponseBody;
-
-      for (final target in sendTargets) {
-        try {
-          final uri = _buildUri(
-            '/gps',
+      final delivery = await _sendRequestToGroupTargets(
+        sendTargets: sendTargets,
+        path: '/gps',
+        timeoutLabel: '/gps',
+        queryForTarget: (target) =>
             _buildGpsQueryForTarget(target, useRelay: useRelay),
-          );
-          final response = await http
-              .get(uri)
-              .timeout(
-                _sendTimeout,
-                onTimeout: () => throw TimeoutException('/gps'),
-              );
-          final body = _decodeResponseBody(response).trim();
-          if (firstResponseBody == null && body.isNotEmpty) {
-            firstResponseBody = body;
-          }
-
-          final deliveryStatus = GpsMessageUtils.deliveryStatusFromResponse(
-            response,
-            body,
-          );
-          if (deliveryStatus == MessageDeliveryStatus.acked) {
-            ackedCount += 1;
-          } else if (deliveryStatus == MessageDeliveryStatus.failed &&
-              GpsMessageUtils.isDefinitiveHttpFailure(response)) {
-            definitiveFailCount += 1;
-          }
-        } on TimeoutException catch (_) {
-          // Treat timeouts as no-ack so the group GPS send can be retried.
-        } catch (_) {
-          definitiveFailCount += 1;
-        }
-      }
+        deliveryStatusForResponse: GpsMessageUtils.deliveryStatusFromResponse,
+        isDefinitiveFailure: GpsMessageUtils.isDefinitiveHttpFailure,
+        onTargetComplete: (target, status) => _updateGroupTargetDeliveryStatus(
+          index: outgoingIndex,
+          target: target,
+          status: status,
+        ),
+      );
 
       final status = _groupDeliveryStatus(
         total: sendTargets.length,
-        ackedCount: ackedCount,
-        definitiveFailCount: definitiveFailCount,
+        ackedCount: delivery.ackedCount,
+        definitiveFailCount: delivery.definitiveFailCount,
       );
       final messageText = GpsMessageUtils.formatResponseMessage(
-        GpsMessageUtils.previewBody(firstResponseBody ?? ''),
+        delivery.firstResponseBody ?? '',
+      ).trim();
+      _updateOutgoingMessageText(
+        outgoingIndex,
+        messageText.isEmpty ? GpsMessageUtils.fallbackMessage : messageText,
       );
-      await _appendOutgoingGroupMessage(
-        messageText,
-        status: status,
-        persistErrorLabel: 'outgoing group GPS message',
+      _setGroupTargetDeliveryStatusMap(
+        index: outgoingIndex,
+        statuses: delivery.targetStatuses,
       );
+      _updateOutgoingDeliveryStatus(outgoingIndex, status);
 
       if (!mounted) return;
       if (status == MessageDeliveryStatus.failed) {
@@ -1286,7 +1543,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final messageText = _messageController.text.trim();
     if (messageText.isEmpty) return;
 
-    await _ensureSelfContact();
+    final sendContext = await _prepareGroupSendContext();
+    if (sendContext == null) return;
+
     final outgoingIndex = await _appendOutgoingGroupMessage(
       messageText,
       persistErrorLabel: 'outgoing group message',
@@ -1295,15 +1554,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     setState(() {
       _currentMessageLength = 0;
     });
-
-    final sendContext = await _prepareGroupSendContext();
-    if (sendContext == null) {
-      _updateOutgoingDeliveryStatus(
-        outgoingIndex,
-        MessageDeliveryStatus.failed,
-      );
-      return;
-    }
 
     await _deliverGroupMessageToTargets(
       plainText: messageText,
@@ -1371,10 +1621,19 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (sendContext == null) return;
 
     _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.sending);
+    final retryTargets = _failedGroupTargetsForRetry(
+      index: index,
+      fallbackTargets: sendContext.sendTargets,
+    );
+    if (retryTargets.isEmpty) {
+      _updateOutgoingDeliveryStatus(index, MessageDeliveryStatus.acked);
+      return;
+    }
     await _deliverGroupMessageToTargets(
       plainText: messageText,
       outgoingIndex: index,
-      sendTargets: sendContext.sendTargets,
+      sendTargets: retryTargets,
+      resetTargetStatuses: false,
       groupWireId: GroupWireUtils.wireToken(widget.groupUuid),
     );
   }
@@ -1412,6 +1671,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       setState(() {
         _messageUuidByIndex.clear();
         _outgoingCreatedAtByIndex.clear();
+        _targetDeliveryStatusByIndex.clear();
         _messages
           ..clear()
           ..add(
@@ -1543,7 +1803,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 color: Theme.of(context).scaffoldBackgroundColor,
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.05),
+                    color: Colors.black.withValues(alpha: 0.05),
                     blurRadius: 6,
                     offset: const Offset(0, -2),
                   ),
@@ -1570,9 +1830,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           Expanded(
                             child: Container(
                               decoration: BoxDecoration(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.surfaceVariant.withOpacity(0.9),
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .surfaceContainerHighest
+                                    .withValues(alpha: 0.9),
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               padding: const EdgeInsets.symmetric(

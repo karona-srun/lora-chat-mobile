@@ -4,6 +4,7 @@ class ChatMessage {
   final DateTime timestamp;
   final bool isSystem;
   final MessageDeliveryStatus deliveryStatus;
+  final String? deliveryDetails;
 
   ChatMessage({
     required this.text,
@@ -11,6 +12,7 @@ class ChatMessage {
     required this.timestamp,
     this.isSystem = false,
     this.deliveryStatus = MessageDeliveryStatus.none,
+    this.deliveryDetails,
   });
 
   ChatMessage copyWith({
@@ -19,6 +21,7 @@ class ChatMessage {
     DateTime? timestamp,
     bool? isSystem,
     MessageDeliveryStatus? deliveryStatus,
+    String? deliveryDetails,
   }) {
     return ChatMessage(
       text: text ?? this.text,
@@ -26,9 +29,9 @@ class ChatMessage {
       timestamp: timestamp ?? this.timestamp,
       isSystem: isSystem ?? this.isSystem,
       deliveryStatus: deliveryStatus ?? this.deliveryStatus,
+      deliveryDetails: deliveryDetails ?? this.deliveryDetails,
     );
   }
 }
 
 enum MessageDeliveryStatus { none, sending, acked, noAck, failed }
-

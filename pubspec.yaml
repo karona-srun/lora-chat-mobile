@@ -108,14 +108,16 @@ flutter:
 # Native splash screen - removes white flash on app startup
 flutter_native_splash:
   color: "#ffffff"
-  color_dark: "#000000"
+  color_ios: "#ffffff"
+  color_dark: "#ffffff"
+  color_dark_ios: "#ffffff"
   image: assets/images/logo.png
   image_dark: assets/images/logo.png
   fullscreen: true
   android_12:
     color: "#ffffff"
-    color_dark: "#000000"
+    color_dark: "#ffffff"
     image: assets/images/logo.png
     image_dark: assets/images/logo.png
     icon_background_color: "#ffffff"
-    icon_background_color_dark: "#000000"
+    icon_background_color_dark: "#ffffff"

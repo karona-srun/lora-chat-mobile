@@ -839,6 +839,19 @@ LIMIT 1;
     );
   }
 
+  Future<void> updateMessagePayload({
+    required String messageUuid,
+    required String payload,
+  }) async {
+    final db = await database;
+    await db.update(
+      'messages',
+      {'payload': payload},
+      where: 'message_uuid = ?',
+      whereArgs: [messageUuid],
+    );
+  }
+
   Future<List<MessageRecord>> listDirectMessages({
     required String contactA,
     required String contactB,

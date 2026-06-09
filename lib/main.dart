@@ -11,9 +11,16 @@ import 'screens/settings_screen.dart';
 import 'services/local_database_service.dart';
 import 'services/message_background_service.dart';
 
+const SystemUiOverlayStyle _darkIosStatusBarStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarBrightness: Brightness.light,
+  statusBarIconBrightness: Brightness.dark,
+);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  SystemChrome.setSystemUIOverlayStyle(_darkIosStatusBarStyle);
   await LocalDatabaseService.instance.ensureInitialized();
   await MessageBackgroundService.ensureInitialized();
   runApp(const SplashWrapper());
@@ -27,18 +34,21 @@ class SplashWrapper extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: FlutterSplashScreen.fadeIn(
-        backgroundColor: Colors.white,
-        duration: const Duration(milliseconds: 1500),
-        onInit: () async {
-          await SharedPreferences.getInstance();
-        },
-        childWidget: SizedBox(
-          height: 200,
-          width: 200,
-          child: Image.asset('assets/images/logo.png', fit: BoxFit.contain),
+      home: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: _darkIosStatusBarStyle,
+        child: FlutterSplashScreen.fadeIn(
+          backgroundColor: Colors.white,
+          duration: const Duration(milliseconds: 1500),
+          onInit: () async {
+            await SharedPreferences.getInstance();
+          },
+          childWidget: SizedBox(
+            height: 200,
+            width: 200,
+            child: Image.asset('assets/images/logo.png', fit: BoxFit.contain),
+          ),
+          nextScreen: const MeshtasticApp(),
         ),
-        nextScreen: const MeshtasticApp(),
       ),
     );
   }
@@ -143,6 +153,9 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
             fontSize: 14,
           ),
         ),
+        appBarTheme: const AppBarTheme(
+          systemOverlayStyle: _darkIosStatusBarStyle,
+        ),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
@@ -191,6 +204,9 @@ class _MeshtasticAppState extends State<MeshtasticApp> {
             color: Colors.white70,
             fontSize: 14,
           ),
+        ),
+        appBarTheme: const AppBarTheme(
+          systemOverlayStyle: _darkIosStatusBarStyle,
         ),
         useMaterial3: true,
       ),

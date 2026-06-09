@@ -4,44 +4,32 @@ import '../models/chat_message.dart';
 
 class GpsMessageUtils {
   static const String fallbackMessage = 'GPS';
-  static final RegExp _numberPattern = RegExp(r'\d+');
+  static final RegExp _gpsPayloadPattern = RegExp(
+    r'GPS\s*,\s*[^,]*\s*,\s*[^,]*\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))',
+    caseSensitive: false,
+  );
 
   static String previewBody(String body, {int maxLength = 200}) {
-    final text = body.trim();
+    final text = body.trim().replaceAll("OK (ACK) ", "").replaceAll("Timeout waiting ACK -", "");
     if (text.length <= maxLength) return text;
     return text.substring(0, maxLength);
   }
 
   static String formatResponseMessage(String body) {
-    final text = body.trim();
+    final text = body.trim().replaceAll("OK (ACK) ", "").replaceAll("Timeout waiting ACK -", "") ;
     if (text.isEmpty) return fallbackMessage;
+
+    final match = _gpsPayloadPattern.firstMatch(text);
+    if (match != null) {
+      final lat = match.group(1)?.trim() ?? '';
+      final lng = match.group(2)?.trim() ?? '';
+      if (lat.isNotEmpty && lng.isNotEmpty) return '$lat,$lng';
+    }
 
     final gpsIndex = text.toUpperCase().indexOf('GPS');
     if (gpsIndex < 0) return text;
 
-    final gpsPayload = text.substring(gpsIndex);
-    final parts = gpsPayload
-        .split(RegExp(r'[,\s]+'))
-        .map((part) => part.trim())
-        .where((part) => part.isNotEmpty)
-        .toList();
-    if (parts.length < 4) return gpsPayload.trim();
-
-    final secondTokenHasNumber = _numberPattern.hasMatch(parts[1]);
-    final statusToken = secondTokenHasNumber
-        ? parts[1]
-        : (parts.length > 2 ? parts[2] : '');
-    final coordinateOffset = secondTokenHasNumber ? 2 : 3;
-    if (statusToken.isEmpty || parts.length <= coordinateOffset + 1) {
-      return gpsPayload.trim();
-    }
-
-    final statusMatch = _numberPattern.firstMatch(statusToken);
-    final status = statusMatch?.group(0) ?? statusToken;
-    final lat = parts[coordinateOffset];
-    final lng = parts[coordinateOffset + 1];
-
-    return '$lat,$lng';
+    return text.substring(gpsIndex).trim();
   }
 
   static MessageDeliveryStatus deliveryStatusFromResponse(
